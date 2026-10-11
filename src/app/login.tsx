@@ -14,6 +14,7 @@ import { router } from 'expo-router';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { authService, parseApiError } from '../services/api';
+import { getDeviceToken } from '../services/pushNotifications';
 import { useTheme } from '../context/ThemeContext';
 import { useToast } from '../context/ToastContext';
 
@@ -38,7 +39,15 @@ export default function LoginScreen() {
 
     setLoading(true);
     try {
-      await authService.login(phone, password);
+      let deviceToken: string | null = null;
+      try {
+        deviceToken = await getDeviceToken();
+      } catch (tokenErr) {
+        console.warn('⚠️ [Login] Device token olishda xatolik:', tokenErr);
+        deviceToken = null;
+      }
+
+      await authService.login(phone, password, deviceToken);
       setLoading(false);
 
       showToast({

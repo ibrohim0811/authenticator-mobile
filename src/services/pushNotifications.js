@@ -102,3 +102,5 @@ export async function getDevicePushToken() {
     return null;
   }
 }
+
+export const getDeviceToken = getDevicePushToken;

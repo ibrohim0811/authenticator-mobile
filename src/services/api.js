@@ -250,6 +250,12 @@ api.interceptors.response.use(
 );
 
 export const authService = {
+  /**
+   * @param {string} fullName
+   * @param {string} phoneNumber
+   * @param {string} password
+   * @param {string | null} [deviceToken=null]
+   */
   register: async (fullName, phoneNumber, password, deviceToken = null) => {
     const formattedPhone = normalizePhone(phoneNumber);
     const res = await api.post('/users/register', {
@@ -266,6 +272,11 @@ export const authService = {
     return res.data;
   },
 
+  /**
+   * @param {string} phoneNumber
+   * @param {string} password
+   * @param {string | null} [deviceToken=null]
+   */
   login: async (phoneNumber, password, deviceToken = null) => {
     const formattedPhone = normalizePhone(phoneNumber);
     const res = await api.post('/users/login', {
