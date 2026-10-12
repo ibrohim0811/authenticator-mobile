@@ -40,21 +40,31 @@ export default function RegisterScreen() {
 
     setLoading(true);
     try {
-      let deviceToken: string | null = null;
+      // Device token har doim qat'iy string sifatida olinadi
+      const deviceToken = await getDeviceToken();
+
       try {
-        deviceToken = await getDeviceToken();
-      } catch (tokenErr) {
-        console.warn('⚠️ [Register] Device token olishda xatolik:', tokenErr);
-        deviceToken = null;
+        await authService.register(fullName, phone, password, deviceToken);
+      } catch (regErr: any) {
+        const errorDetail = regErr?.response?.data?.detail || regErr?.message || '';
+        const isAlreadyRegistered =
+          regErr?.response?.status === 400 &&
+          (typeof errorDetail === 'string' && errorDetail.toLowerCase().includes('allaqachon'));
+
+        // Agar hisob allaqachon yaratilgan bo'lsa (masalan birinchi urinishda yozilib ulgurgan), avtomatik login qilamiz
+        if (isAlreadyRegistered) {
+          console.log('🔄 [Register -> Auto Login]: Raqam avval yaratilgan, avtomatik tizimga kirilmoqda...');
+          await authService.login(phone, password, deviceToken);
+        } else {
+          throw regErr;
+        }
       }
 
-      await authService.register(fullName, phone, password, deviceToken);
       setLoading(false);
-
       showToast({
         type: 'success',
-        title: 'Roʻyxatdan oʻtdingiz! 🎉',
-        message: 'Hisobingiz yaratildi. Kirish uchun 4-xonali PIN-kod oʻrnating.',
+        title: 'Muvaffaqiyatli! 🎉',
+        message: 'Hisobingiz tayyor. Kirish uchun 4-xonali PIN-kod oʻrnating.',
       });
 
       router.replace('/lock');

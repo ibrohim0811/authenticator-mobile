@@ -38,7 +38,7 @@ const api = axios.create({
   headers: {
     'Content-Type': 'application/json',
   },
-  timeout: 10000,
+  timeout: 35000,
 });
 
 // Dynamic Base URL loader
@@ -249,6 +249,10 @@ api.interceptors.response.use(
   }
 );
 
+export const getServicesHostUrl = () => {
+  return api.defaults.baseURL.replace(/\/api\/v1\/?$/, '');
+};
+
 export const authService = {
   /**
    * @param {string} fullName
@@ -257,17 +261,35 @@ export const authService = {
    * @param {string | null} [deviceToken=null]
    */
   register: async (fullName, phoneNumber, password, deviceToken = null) => {
+    let resolvedDeviceToken = deviceToken;
+    if (!resolvedDeviceToken) {
+      try {
+        const { getDeviceToken } = require('./pushNotifications');
+        resolvedDeviceToken = await getDeviceToken();
+      } catch (tErr) {
+        console.warn('⚠️ [API DeviceToken resolve error]:', tErr);
+      }
+    }
+
     const formattedPhone = normalizePhone(phoneNumber);
     const res = await api.post('/users/register', {
       full_name: fullName,
       phone_number: formattedPhone,
       password: password,
-      device_token: deviceToken,
+      device_token: resolvedDeviceToken,
     });
+
     if (res.data) {
       if (res.data.access_token) await safeStorage.setItem('userToken', res.data.access_token);
       if (res.data.refresh_token) await safeStorage.setItem('refreshToken', res.data.refresh_token);
       await safeStorage.setItem('isRegistered', 'true');
+
+      if (res.data.user) {
+        await safeStorage.setItem('userInfo', JSON.stringify(res.data.user));
+        if (res.data.user.role) {
+          await safeStorage.setItem('userRole', String(res.data.user.role).toLowerCase());
+        }
+      }
     }
     return res.data;
   },
@@ -278,26 +300,70 @@ export const authService = {
    * @param {string | null} [deviceToken=null]
    */
   login: async (phoneNumber, password, deviceToken = null) => {
+    let resolvedDeviceToken = deviceToken;
+    if (!resolvedDeviceToken) {
+      try {
+        const { getDeviceToken } = require('./pushNotifications');
+        resolvedDeviceToken = await getDeviceToken();
+      } catch (tErr) {
+        console.warn('⚠️ [API DeviceToken resolve error]:', tErr);
+      }
+    }
+
     const formattedPhone = normalizePhone(phoneNumber);
     const res = await api.post('/users/login', {
       phone_number: formattedPhone,
       password: password,
-      device_token: deviceToken,
+      device_token: resolvedDeviceToken,
     });
+
     if (res.data) {
       if (res.data.access_token) await safeStorage.setItem('userToken', res.data.access_token);
       if (res.data.refresh_token) await safeStorage.setItem('refreshToken', res.data.refresh_token);
       await safeStorage.setItem('isRegistered', 'true');
+
+      if (res.data.user) {
+        await safeStorage.setItem('userInfo', JSON.stringify(res.data.user));
+        if (res.data.user.role) {
+          await safeStorage.setItem('userRole', String(res.data.user.role).toLowerCase());
+        }
+      }
     }
     return res.data;
   },
 
   getCurrentUser: async () => {
-    const res = await api.get('/users/me');
-    return res.data;
+    try {
+      const res = await api.get('/users/me');
+      if (res.data) {
+        await safeStorage.setItem('userInfo', JSON.stringify(res.data));
+        if (res.data.role) {
+          await safeStorage.setItem('userRole', String(res.data.role).toLowerCase());
+        }
+        return res.data;
+      }
+    } catch (err) {
+      console.warn('⚠️ [/users/me error, fallback to local storage]:', err?.message);
+    }
+
+    const localUser = await safeStorage.getItem('userInfo');
+    return localUser ? JSON.parse(localUser) : null;
   },
 
-  // 4. Logout (Tuzatildi: api.post o'rniga mustaqil axios ishlatildi)
+  getUserRole: async () => {
+    const role = await safeStorage.getItem('userRole');
+    if (role) return role.toLowerCase();
+    const localUser = await safeStorage.getItem('userInfo');
+    if (localUser) {
+      try {
+        const parsed = JSON.parse(localUser);
+        if (parsed.role) return String(parsed.role).toLowerCase();
+      } catch (e) {}
+    }
+    return 'user';
+  },
+
+  // Logout (har ikkala token va ma'lumotlarni tozalash)
   logout: async () => {
     try {
       const token = await safeStorage.getItem('userToken');
@@ -305,7 +371,7 @@ export const authService = {
         await axios.post(
           `${api.defaults.baseURL}/users/logout`,
           {},
-          { headers: { Authorization: `Bearer ${token}` }, timeout: 5000 }
+          { headers: { Authorization: `Bearer ${token}` }, timeout: 6000 }
         );
         console.log('✅ [Logout Success]: Server refresh token revoked');
       }
@@ -315,6 +381,8 @@ export const authService = {
       await safeStorage.deleteItem('userToken');
       await safeStorage.deleteItem('refreshToken');
       await safeStorage.deleteItem('isRegistered');
+      await safeStorage.deleteItem('userInfo');
+      await safeStorage.deleteItem('userRole');
     }
   },
 
@@ -332,6 +400,119 @@ export const notificationService = {
 
   markAsRead: async (notificationId) => {
     const res = await api.patch(`/notifications/${notificationId}/read`);
+    return res.data;
+  },
+};
+
+/**
+ * Services API for OWNER role
+ * Base path: /services (Root path, not /api/v1)
+ */
+export const servicesService = {
+  /**
+   * Get all registered services
+   * GET /services
+   */
+  getServices: async () => {
+    const host = getServicesHostUrl();
+    const token = await safeStorage.getItem('userToken');
+    const res = await axios.get(`${host}/services`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+      timeout: 30000,
+    });
+    return res.data;
+  },
+
+  /**
+   * Register a new service (Owner only)
+   * POST /services/register
+   * multipart/form-data
+   * @param {{ name: string, title: string, about?: string, logo?: any }} payload
+   */
+  registerService: async ({ name, title, about, logo }) => {
+    const host = getServicesHostUrl();
+    const token = await safeStorage.getItem('userToken');
+
+    const formData = new FormData();
+    formData.append('name', name.trim());
+    formData.append('title', title.trim());
+    if (about && about.trim()) {
+      formData.append('about', about.trim());
+    }
+
+    if (logo && typeof logo === 'object' && logo.uri) {
+      const filename = logo.name || logo.uri.split('/').pop() || 'logo.png';
+      const match = /\.(\w+)$/.exec(filename);
+      const type = match ? `image/${match[1]}` : 'image/png';
+      formData.append('logo', {
+        uri: logo.uri,
+        name: filename,
+        type: type,
+      });
+    }
+
+    const res = await axios.post(`${host}/services/register`, formData, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'multipart/form-data',
+      },
+      timeout: 35000,
+    });
+    return res.data;
+  },
+
+  /**
+   * Send broadcast message to all users
+   * POST /services/broadcast
+   * @param {{ title: string, message: string }}
+   */
+  broadcastMessage: async ({ title, message }) => {
+    const host = getServicesHostUrl();
+    const token = await safeStorage.getItem('userToken');
+    const res = await axios.post(
+      `${host}/services/broadcast`,
+      {
+        title: title.trim(),
+        message: message.trim(),
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        timeout: 30000,
+      }
+    );
+    return res.data;
+  },
+
+  /**
+   * Send message to a single user
+   * POST /services/messages/send
+   * @param {{ service_id: string, token: string, user_phone: string, message: string }}
+   */
+  sendMessageToUser: async ({ service_id, token: serviceToken, user_phone, message }) => {
+    const host = getServicesHostUrl();
+    const token = await safeStorage.getItem('userToken');
+    const formattedPhone = normalizePhone(user_phone);
+    const res = await axios.post(
+      `${host}/services/messages/send`,
+      {
+        service_id: service_id,
+        token: serviceToken,
+        user_phone: formattedPhone,
+        message: message.trim(),
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        timeout: 30000,
+      }
+    );
     return res.data;
   },
 };

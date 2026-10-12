@@ -13,6 +13,8 @@ import {
   Animated,
   Dimensions,
   Image,
+  TextInput,
+  Modal,
 } from 'react-native';
 import { router } from 'expo-router';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -21,6 +23,7 @@ import { notificationService, authService, parseApiError, getFullLogoUrl } from 
 import { useTheme } from '../context/ThemeContext';
 import { useToast } from '../context/ToastContext';
 import { requestPushPermissions, sendLocalPushNotification } from '../services/pushNotifications';
+import OwnerPanelModal from '../components/OwnerPanelModal';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const DRAWER_WIDTH = Math.min(SCREEN_WIDTH * 0.82, 340);
@@ -56,7 +59,18 @@ export default function NotificationsScreen() {
   const [list, setList] = useState<NotificationItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [userInfo, setUserInfo] = useState<{ id?: string; full_name?: string; phone_number?: string } | null>(null);
+  const [userInfo, setUserInfo] = useState<{ id?: string; full_name?: string; phone_number?: string; role?: string } | null>(null);
+  const [isOwner, setIsOwner] = useState(false);
+
+  // Owner Panel Modal State
+  const [ownerModalVisible, setOwnerModalVisible] = useState(false);
+
+  // Notification Detail Modal State
+  const [selectedNotif, setSelectedNotif] = useState<NotificationItem | null>(null);
+
+  // Filter & Search State
+  const [searchQuery, setSearchQuery] = useState('');
+  const [filterMode, setFilterMode] = useState<'all' | 'unread'>('all');
 
   // Track known notification IDs to trigger push notification for new ones
   const previousNotifIdsRef = useRef<Set<string>>(new Set());
@@ -86,9 +100,16 @@ export default function NotificationsScreen() {
   const fetchUser = async () => {
     try {
       const data = await authService.getCurrentUser();
-      setUserInfo(data);
+      if (data) {
+        setUserInfo(data);
+      }
+      const role = await authService.getUserRole();
+      const ownerCheck =
+        (data?.role && String(data.role).toLowerCase() === 'owner') ||
+        (role && role.toLowerCase() === 'owner');
+      setIsOwner(Boolean(ownerCheck));
     } catch (err: any) {
-      console.log('User fetch info:', parseApiError(err));
+      console.log('User fetch info error:', parseApiError(err));
     }
   };
 
@@ -105,7 +126,7 @@ export default function NotificationsScreen() {
 
       setList(rawItems);
 
-      // Detect new incoming notifications from services and trigger Phone Push Notifications
+      // Detect new incoming notifications and trigger Phone Push Notifications
       if (!isInitial && rawItems.length > 0) {
         const previousIds = previousNotifIdsRef.current;
         const newItems = rawItems.filter((item) => item.id && !previousIds.has(item.id));
@@ -119,7 +140,6 @@ export default function NotificationsScreen() {
         });
       }
 
-      // Update known IDs reference
       const currentIds = new Set<string>();
       rawItems.forEach((item) => {
         if (item.id) currentIds.add(item.id);
@@ -141,7 +161,6 @@ export default function NotificationsScreen() {
   }, [showToast]);
 
   useEffect(() => {
-    // Request push notification permissions on mount
     requestPushPermissions();
     fetchUser();
     fetchNotifications(true);
@@ -149,6 +168,7 @@ export default function NotificationsScreen() {
 
   const onRefresh = () => {
     setRefreshing(true);
+    fetchUser();
     fetchNotifications(false);
   };
 
@@ -163,6 +183,41 @@ export default function NotificationsScreen() {
       setList((prev) =>
         prev.map((item) => (item.id === id ? { ...item, is_read: true } : item))
       );
+    }
+  };
+
+  const handleMarkAllAsRead = async () => {
+    const unreadItems = list.filter((n) => !n.is_read);
+    if (unreadItems.length === 0) {
+      showToast({
+        type: 'info',
+        title: 'Barchasi oʻqilgan',
+        message: 'Oʻqilmagan yangi bildirishnomalar yoʻq.',
+      });
+      return;
+    }
+
+    setList((prev) => prev.map((item) => ({ ...item, is_read: true })));
+
+    for (const item of unreadItems) {
+      try {
+        await notificationService.markAsRead(item.id);
+      } catch (e) {
+        // Continue
+      }
+    }
+
+    showToast({
+      type: 'success',
+      title: 'Barchasi oʻqildi',
+      message: 'Barcha bildirishnomalar oʻqilgan deb belgilandi.',
+    });
+  };
+
+  const handleOpenNotification = (item: NotificationItem) => {
+    setSelectedNotif(item);
+    if (!item.is_read) {
+      handleMarkAsRead(item.id);
     }
   };
 
@@ -195,8 +250,7 @@ export default function NotificationsScreen() {
     }
   };
 
-  // DYNAMICALLY GENERATE SERVICES LIST FROM ACTUAL FETCHED NOTIFICATIONS DATA
-  // No hardcoded sample services!
+  // Dynamically generate services list from fetched notifications
   const servicesList: ServiceItem[] = React.useMemo(() => {
     const allServiceItem: ServiceItem = {
       id: ALL_SERVICES_ID,
@@ -204,7 +258,7 @@ export default function NotificationsScreen() {
       title: 'Barcha Xizmatlar',
       icon: 'apps-sharp',
       color: colors.accent,
-      latestMessage: list.length > 0 ? list[0].message : 'Barcha xizmatlardan kelgan bildirishnomalar',
+      latestMessage: list.length > 0 ? list[0].message : 'Barcha xizmatlardan bildirishnomalar',
       count: list.length,
     };
 
@@ -212,7 +266,7 @@ export default function NotificationsScreen() {
 
     list.forEach((item) => {
       const srvId = item.service_id || item.service_name || 'default_service';
-      const srvTitle = item.service_name || 'Xizmat Push Notification';
+      const srvTitle = item.service_name || 'Hamkor Xizmat';
 
       if (!map.has(srvId)) {
         map.set(srvId, {
@@ -234,14 +288,34 @@ export default function NotificationsScreen() {
     return [allServiceItem, ...Array.from(map.values())];
   }, [list, colors.accent]);
 
+  // Filtered notifications
   const filteredNotifications = list.filter((item) => {
-    if (selectedServiceId === ALL_SERVICES_ID) return true;
-    const srvId = item.service_id || item.service_name || 'default_service';
-    return srvId === selectedServiceId;
+    // Service filter
+    if (selectedServiceId !== ALL_SERVICES_ID) {
+      const srvId = item.service_id || item.service_name || 'default_service';
+      if (srvId !== selectedServiceId) return false;
+    }
+
+    // Read/Unread filter
+    if (filterMode === 'unread' && item.is_read) {
+      return false;
+    }
+
+    // Search query filter
+    if (searchQuery.trim()) {
+      const query = searchQuery.trim().toLowerCase();
+      const matchMsg = item.message?.toLowerCase().includes(query);
+      const matchService = item.service_name?.toLowerCase().includes(query);
+      return matchMsg || matchService;
+    }
+
+    return true;
   });
 
   const selectedServiceObj =
     servicesList.find((s) => s.id === selectedServiceId) || servicesList[0];
+
+  const unreadCount = list.filter((n) => !n.is_read).length;
 
   return (
     <LinearGradient colors={colors.bg} style={styles.container}>
@@ -254,28 +328,50 @@ export default function NotificationsScreen() {
             onPress={() => toggleDrawer(true)}
             activeOpacity={0.8}
           >
-            <Ionicons name="menu-sharp" size={24} color={colors.accent} />
+            <Ionicons name="menu-sharp" size={22} color={colors.accent} />
           </TouchableOpacity>
 
-          {/* User Info Header */}
+          {/* User Info Header with Role Badge */}
           <View style={styles.userHead}>
-            <Text style={[styles.userNameText, { color: colors.textPrimary }]} numberOfLines={1}>
-              {userInfo?.full_name || 'Foydalanuvchi'}
-            </Text>
+            <View style={styles.userNameRow}>
+              <Text style={[styles.userNameText, { color: colors.textPrimary }]} numberOfLines={1}>
+                {userInfo?.full_name || 'Foydalanuvchi'}
+              </Text>
+              {isOwner && (
+                <View style={styles.ownerBadge}>
+                  <Text style={styles.ownerBadgeText}>OWNER</Text>
+                </View>
+              )}
+            </View>
             <Text style={[styles.userSubText, { color: colors.textMuted }]} numberOfLines={1}>
-              {userInfo?.phone_number || 'Authenticator Active'}
+              {userInfo?.phone_number || 'Faol Seans'}
             </Text>
           </View>
 
-          {/* Actions: Theme Toggle & Logout */}
+          {/* Top Actions: Admin (Owner Only) | Theme Toggle | Logout */}
           <View style={styles.topActions}>
+            {/* ADMIN ICON (ONLY FOR OWNER) */}
+            {isOwner && (
+              <TouchableOpacity
+                style={[
+                  styles.iconCircle,
+                  styles.adminOwnerBtn,
+                  { backgroundColor: 'rgba(234, 179, 8, 0.16)', borderColor: '#eab308' },
+                ]}
+                onPress={() => setOwnerModalVisible(true)}
+                activeOpacity={0.8}
+              >
+                <Ionicons name="shield-checkmark" size={20} color="#eab308" />
+              </TouchableOpacity>
+            )}
+
             <TouchableOpacity
               style={[styles.iconCircle, { backgroundColor: colors.cardBg, borderColor: colors.cardBorder }]}
               onPress={toggleTheme}
             >
               <Ionicons
                 name={theme === 'dark' ? 'sunny-outline' : 'moon-outline'}
-                size={20}
+                size={18}
                 color={colors.accent}
               />
             </TouchableOpacity>
@@ -284,33 +380,97 @@ export default function NotificationsScreen() {
               style={[styles.iconCircle, { backgroundColor: colors.cardBg, borderColor: colors.cardBorder }]}
               onPress={handleLogout}
             >
-              <Ionicons name="log-out-outline" size={20} color="#ef4444" />
+              <Ionicons name="log-out-outline" size={18} color="#ef4444" />
             </TouchableOpacity>
           </View>
         </View>
 
-        {/* ACTIVE SERVICE BANNER */}
-        <View style={[styles.activeServiceBanner, { borderColor: colors.cardBorder }]}>
-          <LinearGradient colors={[colors.cardBg, 'rgba(0,0,0,0)']} style={styles.bannerInner}>
-            <View style={styles.bannerLeft}>
-              {selectedServiceObj.logo_url ? (
-                <Image source={{ uri: getFullLogoUrl(selectedServiceObj.logo_url) || undefined }} style={styles.serviceLogoImage} />
-              ) : (
-                <View style={[styles.serviceIconCircle, { backgroundColor: `${selectedServiceObj.color}20` }]}>
-                  <Ionicons name={selectedServiceObj.icon} size={22} color={selectedServiceObj.color} />
-                </View>
-              )}
-              <View style={{ marginLeft: 12, flex: 1 }}>
-                <Text style={[styles.bannerTitle, { color: colors.textPrimary }]} numberOfLines={1}>
-                  {selectedServiceObj.title}
-                </Text>
-                <Text style={[styles.bannerSub, { color: colors.textMuted }]}>
-                  {filteredNotifications.length} ta bildirishnoma
-                </Text>
-              </View>
-            </View>
-          </LinearGradient>
+        {/* QUICK STATS & GLANCE BANNER */}
+        <View style={styles.statsRow}>
+          <View style={[styles.statCard, { backgroundColor: colors.cardBg, borderColor: colors.cardBorder }]}>
+            <Text style={[styles.statValue, { color: colors.textPrimary }]}>{list.length}</Text>
+            <Text style={[styles.statLabel, { color: colors.textMuted }]}>Jami</Text>
+          </View>
+
+          <View style={[styles.statCard, { backgroundColor: colors.cardBg, borderColor: unreadCount > 0 ? colors.accent : colors.cardBorder }]}>
+            <Text style={[styles.statValue, { color: unreadCount > 0 ? colors.accent : colors.textPrimary }]}>
+              {unreadCount}
+            </Text>
+            <Text style={[styles.statLabel, { color: colors.textMuted }]}>Oʻqilmagan</Text>
+          </View>
+
+          <View style={[styles.statCard, { backgroundColor: colors.cardBg, borderColor: colors.cardBorder }]}>
+            <Text style={[styles.statValue, { color: colors.textPrimary }]}>{servicesList.length - 1}</Text>
+            <Text style={[styles.statLabel, { color: colors.textMuted }]}>Xizmatlar</Text>
+          </View>
+
+          <TouchableOpacity
+            style={[styles.markAllBtn, { backgroundColor: colors.cardBg, borderColor: colors.cardBorder }]}
+            onPress={handleMarkAllAsRead}
+          >
+            <Ionicons name="checkmark-done" size={18} color={colors.accent} />
+            <Text style={[styles.markAllTxt, { color: colors.accent }]}>Oʻqildi</Text>
+          </TouchableOpacity>
         </View>
+
+        {/* SEARCH & FILTERS BAR */}
+        <View style={styles.searchFilterContainer}>
+          <View style={[styles.searchBox, { backgroundColor: colors.inputBg, borderColor: colors.inputBorder }]}>
+            <Ionicons name="search-outline" size={18} color={colors.textMuted} style={{ marginRight: 8 }} />
+            <TextInput
+              style={[styles.searchInput, { color: colors.textPrimary }]}
+              placeholder="Xabarlarni qidirish..."
+              placeholderTextColor={colors.textMuted}
+              value={searchQuery}
+              onChangeText={setSearchQuery}
+            />
+            {searchQuery.length > 0 && (
+              <TouchableOpacity onPress={() => setSearchQuery('')}>
+                <Ionicons name="close-circle" size={16} color={colors.textMuted} />
+              </TouchableOpacity>
+            )}
+          </View>
+
+          <View style={styles.filterPillsRow}>
+            <TouchableOpacity
+              style={[
+                styles.filterPill,
+                filterMode === 'all' && [styles.activeFilterPill, { backgroundColor: colors.accent }],
+                { borderColor: colors.cardBorder },
+              ]}
+              onPress={() => setFilterMode('all')}
+            >
+              <Text style={[styles.filterPillTxt, { color: filterMode === 'all' ? '#fff' : colors.textMuted }]}>
+                Barchasi
+              </Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={[
+                styles.filterPill,
+                filterMode === 'unread' && [styles.activeFilterPill, { backgroundColor: colors.accent }],
+                { borderColor: colors.cardBorder },
+              ]}
+              onPress={() => setFilterMode('unread')}
+            >
+              <Text style={[styles.filterPillTxt, { color: filterMode === 'unread' ? '#fff' : colors.textMuted }]}>
+                Faqat yangilar ({unreadCount})
+              </Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+
+        {/* ACTIVE SERVICE BADGE BANNER */}
+        {selectedServiceId !== ALL_SERVICES_ID && (
+          <View style={[styles.activeFilterBanner, { backgroundColor: `${colors.accent}15`, borderColor: colors.accent }]}>
+            <Text style={[styles.activeFilterTxt, { color: colors.accent }]}>
+              Filtr: {selectedServiceObj.title}
+            </Text>
+            <TouchableOpacity onPress={() => setSelectedServiceId(ALL_SERVICES_ID)}>
+              <Ionicons name="close" size={16} color={colors.accent} />
+            </TouchableOpacity>
+          </View>
+        )}
 
         {/* NOTIFICATIONS LIST */}
         {loading ? (
@@ -337,12 +497,12 @@ export default function NotificationsScreen() {
               <View style={styles.emptyContainer}>
                 <Ionicons name="notifications-off-outline" size={56} color={colors.textMuted} />
                 <Text style={[styles.emptyTitle, { color: colors.textSecondary }]}>
-                  Bildirishnomalar mavjud emas
+                  Bildirishnomalar topilmadi
                 </Text>
                 <Text style={[styles.emptySub, { color: colors.textMuted }]}>
-                  {selectedServiceId === ALL_SERVICES_ID
-                    ? 'Hali birorta hamkor xizmatdan bildirishnoma kelmadi. Yangi kelgan xabarlar avtomatik shu yerda koʻrinadi.'
-                    : `"${selectedServiceObj.title}" xizmatidan hozircha xabarlar mavjud emas.`}
+                  {searchQuery
+                    ? `"${searchQuery}" boʻyicha birorta ham xabar topilmadi.`
+                    : 'Yangi kelgan xabarlar avtomatik shu yerda koʻrinadi.'}
                 </Text>
               </View>
             }
@@ -353,12 +513,15 @@ export default function NotificationsScreen() {
                   { backgroundColor: colors.cardBg, borderColor: colors.cardBorder },
                   !item.is_read && { borderColor: colors.accent, borderWidth: 1.5 },
                 ]}
-                onPress={() => handleMarkAsRead(item.id)}
+                onPress={() => handleOpenNotification(item)}
                 activeOpacity={0.8}
               >
                 <View style={styles.cardRow}>
                   {item.logo_url ? (
-                    <Image source={{ uri: getFullLogoUrl(item.logo_url) || undefined }} style={styles.cardLogoImage} />
+                    <Image
+                      source={{ uri: getFullLogoUrl(item.logo_url) || undefined }}
+                      style={styles.cardLogoImage}
+                    />
                   ) : (
                     <View
                       style={[
@@ -367,7 +530,7 @@ export default function NotificationsScreen() {
                       ]}
                     >
                       <Ionicons
-                        name={item.is_read ? 'mail-open-outline' : 'mail-unread-sharp'}
+                        name={item.is_read ? 'mail-open-outline' : 'mail-unread'}
                         size={20}
                         color={item.is_read ? colors.textMuted : colors.accent}
                       />
@@ -375,16 +538,17 @@ export default function NotificationsScreen() {
                   )}
 
                   <View style={{ flex: 1, marginLeft: 12 }}>
-                    {item.service_name && (
-                      <Text style={[styles.cardServiceTag, { color: colors.accent }]}>
-                        {item.service_name}
+                    <View style={styles.cardTopMeta}>
+                      <Text style={[styles.cardServiceTag, { color: colors.accent }]} numberOfLines={1}>
+                        {item.service_name || 'Xizmat Bildirishnomasi'}
                       </Text>
-                    )}
-                    <Text style={[styles.cardMsg, { color: colors.textPrimary }]}>
+                      <Text style={[styles.cardTime, { color: colors.textMuted }]}>
+                        {formatDate(item.sent_at || item.created_at)}
+                      </Text>
+                    </View>
+
+                    <Text style={[styles.cardMsg, { color: colors.textPrimary }]} numberOfLines={2}>
                       {item.message}
-                    </Text>
-                    <Text style={[styles.cardTime, { color: colors.textMuted }]}>
-                      {formatDate(item.sent_at || item.created_at)}
                     </Text>
                   </View>
 
@@ -397,7 +561,7 @@ export default function NotificationsScreen() {
           />
         )}
 
-        {/* OVERLAY BACKDROP FOR LEFT DRAWER */}
+        {/* OVERLAY BACKDROP FOR DRAWER */}
         {isDrawerOpen && (
           <Animated.View style={[styles.overlay, { opacity: overlayAnim }]}>
             <TouchableOpacity
@@ -408,7 +572,7 @@ export default function NotificationsScreen() {
           </Animated.View>
         )}
 
-        {/* DYNAMIC LEFT HAMBURGER SERVICES DRAWER */}
+        {/* LEFT HAMBURGER SERVICES DRAWER */}
         <Animated.View
           style={[
             styles.drawerContainer,
@@ -419,7 +583,6 @@ export default function NotificationsScreen() {
           ]}
         >
           <LinearGradient colors={colors.drawerBg} style={styles.drawerInner}>
-            {/* Drawer Header */}
             <View style={[styles.drawerHeader, { borderBottomColor: colors.cardBorder }]}>
               <View style={styles.drawerHeaderLeft}>
                 <View style={[styles.drawerBadge, { backgroundColor: `${colors.accent}20`, borderColor: colors.cardBorder }]}>
@@ -437,7 +600,6 @@ export default function NotificationsScreen() {
               Faol Xizmatlar Roʻyxati
             </Text>
 
-            {/* Dynamic Services List with Logo, Title & Latest Message */}
             <FlatList
               data={servicesList}
               keyExtractor={(item) => item.id}
@@ -490,7 +652,6 @@ export default function NotificationsScreen() {
                       )}
                     </View>
 
-                    {/* Latest message underneath service title */}
                     {item.latestMessage && (
                       <Text
                         style={[styles.serviceDrawerSubMessage, { color: colors.textMuted }]}
@@ -504,17 +665,78 @@ export default function NotificationsScreen() {
               }}
             />
 
-            {/* Drawer Footer */}
             <View style={[styles.drawerFooter, { borderTopColor: colors.cardBorder }]}>
               <View style={styles.footerInfoBox}>
                 <Ionicons name="shield-checkmark-outline" size={16} color={colors.accent} />
                 <Text style={[styles.footerText, { color: colors.textMuted }]}>
-                  Partner Push API v1.0 • Immediate Auth
+                  Authenticator v1.0 • Immediate Push
                 </Text>
               </View>
             </View>
           </LinearGradient>
         </Animated.View>
+
+        {/* OWNER ADMIN PANEL MODAL */}
+        <OwnerPanelModal
+          visible={ownerModalVisible}
+          onClose={() => setOwnerModalVisible(false)}
+          onServiceCreated={() => fetchNotifications(false)}
+        />
+
+        {/* NOTIFICATION DETAIL MODAL */}
+        <Modal
+          visible={Boolean(selectedNotif)}
+          animationType="fade"
+          transparent
+          onRequestClose={() => setSelectedNotif(null)}
+        >
+          <View style={styles.modalBackdrop}>
+            <View style={[styles.detailModalCard, { backgroundColor: colors.cardBg, borderColor: colors.cardBorder }]}>
+              <View style={styles.detailHeaderRow}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', flex: 1 }}>
+                  {selectedNotif?.logo_url ? (
+                    <Image
+                      source={{ uri: getFullLogoUrl(selectedNotif.logo_url) || undefined }}
+                      style={styles.detailLogoImg}
+                    />
+                  ) : (
+                    <View style={[styles.detailDefaultLogo, { backgroundColor: `${colors.accent}20` }]}>
+                      <Ionicons name="mail" size={20} color={colors.accent} />
+                    </View>
+                  )}
+                  <View style={{ marginLeft: 10, flex: 1 }}>
+                    <Text style={[styles.detailServiceTitle, { color: colors.textPrimary }]} numberOfLines={1}>
+                      {selectedNotif?.service_name || 'Xizmat Xabari'}
+                    </Text>
+                    <Text style={[styles.detailDateTxt, { color: colors.textMuted }]}>
+                      {formatDate(selectedNotif?.sent_at || selectedNotif?.created_at)}
+                    </Text>
+                  </View>
+                </View>
+
+                <TouchableOpacity
+                  style={[styles.closeDetailBtn, { borderColor: colors.cardBorder }]}
+                  onPress={() => setSelectedNotif(null)}
+                >
+                  <Ionicons name="close" size={20} color={colors.textPrimary} />
+                </TouchableOpacity>
+              </View>
+
+              <View style={[styles.detailDivider, { backgroundColor: colors.cardBorder }]} />
+
+              <Text style={[styles.detailMessageTxt, { color: colors.textPrimary }]}>
+                {selectedNotif?.message}
+              </Text>
+
+              <TouchableOpacity
+                style={[styles.detailDoneBtn, { backgroundColor: colors.accent }]}
+                onPress={() => setSelectedNotif(null)}
+              >
+                <Text style={styles.detailDoneTxt}>Tushunarli</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </Modal>
       </SafeAreaView>
     </LinearGradient>
   );
@@ -536,9 +758,9 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
   },
   hamburgerBtn: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
+    width: 42,
+    height: 42,
+    borderRadius: 21,
     justifyContent: 'center',
     alignItems: 'center',
     borderWidth: 1,
@@ -548,70 +770,136 @@ const styles = StyleSheet.create({
     marginHorizontal: 12,
     alignItems: 'flex-start',
   },
+  userNameRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
   userNameText: {
     fontSize: 15,
     fontWeight: '700',
+    maxWidth: 160,
+  },
+  ownerBadge: {
+    backgroundColor: '#eab308',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 6,
+    marginLeft: 6,
+  },
+  ownerBadgeText: {
+    color: '#000000',
+    fontSize: 10,
+    fontWeight: '800',
+    letterSpacing: 0.5,
   },
   userSubText: {
     fontSize: 12,
+    marginTop: 2,
   },
   topActions: {
     flexDirection: 'row',
     alignItems: 'center',
   },
   iconCircle: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
+    width: 38,
+    height: 38,
+    borderRadius: 19,
     borderWidth: 1,
     justifyContent: 'center',
     alignItems: 'center',
     marginLeft: 8,
   },
-  activeServiceBanner: {
-    marginHorizontal: 16,
-    marginTop: 6,
-    marginBottom: 14,
-    borderRadius: 18,
-    overflow: 'hidden',
+  adminOwnerBtn: {
+    borderWidth: 1.5,
+  },
+  statsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    marginBottom: 10,
+    gap: 8,
+  },
+  statCard: {
+    flex: 1,
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+    borderRadius: 14,
+    borderWidth: 1,
+    alignItems: 'center',
+  },
+  statValue: {
+    fontSize: 16,
+    fontWeight: '800',
+  },
+  statLabel: {
+    fontSize: 11,
+    marginTop: 2,
+  },
+  markAllBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderRadius: 14,
+    borderWidth: 1,
+    gap: 4,
+  },
+  markAllTxt: {
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  searchFilterContainer: {
+    paddingHorizontal: 16,
+    marginBottom: 12,
+  },
+  searchBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    height: 42,
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    borderWidth: 1,
+    marginBottom: 8,
+  },
+  searchInput: {
+    flex: 1,
+    fontSize: 13,
+  },
+  filterPillsRow: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  filterPill: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 14,
     borderWidth: 1,
   },
-  bannerInner: {
+  activeFilterPill: {
+    borderColor: 'transparent',
+  },
+  filterPillTxt: {
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  activeFilterBanner: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    padding: 14,
-  },
-  bannerLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    flex: 1,
-  },
-  serviceIconCircle: {
-    width: 42,
-    height: 42,
-    borderRadius: 21,
-    justifyContent: 'center',
-    alignItems: 'center',
+    marginHorizontal: 16,
+    marginBottom: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 10,
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.15)',
   },
-  serviceLogoImage: {
-    width: 42,
-    height: 42,
-    borderRadius: 12,
-  },
-  bannerTitle: {
-    fontSize: 15,
-    fontWeight: '700',
-  },
-  bannerSub: {
+  activeFilterTxt: {
     fontSize: 12,
-    marginTop: 2,
+    fontWeight: '600',
   },
   listContent: {
     paddingHorizontal: 16,
-    paddingBottom: 30,
+    paddingBottom: 40,
   },
   centerContainer: {
     flex: 1,
@@ -623,9 +911,9 @@ const styles = StyleSheet.create({
     fontSize: 14,
   },
   glassCard: {
-    borderRadius: 18,
-    padding: 16,
-    marginBottom: 12,
+    borderRadius: 16,
+    padding: 14,
+    marginBottom: 10,
     borderWidth: 1,
   },
   cardRow: {
@@ -633,32 +921,37 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   cardIconCircle: {
-    width: 40,
-    height: 40,
-    borderRadius: 14,
+    width: 38,
+    height: 38,
+    borderRadius: 12,
     backgroundColor: 'rgba(255, 255, 255, 0.05)',
     justifyContent: 'center',
     alignItems: 'center',
   },
   cardLogoImage: {
-    width: 40,
-    height: 40,
+    width: 38,
+    height: 38,
     borderRadius: 12,
   },
+  cardTopMeta: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 4,
+  },
   cardServiceTag: {
-    fontSize: 11,
+    fontSize: 12,
     fontWeight: '700',
-    marginBottom: 2,
-    textTransform: 'uppercase',
+    flex: 1,
   },
   cardMsg: {
-    fontSize: 14,
-    lineHeight: 20,
-    fontWeight: '500',
+    fontSize: 13,
+    lineHeight: 18,
+    fontWeight: '400',
   },
   cardTime: {
     fontSize: 11,
-    marginTop: 4,
+    marginLeft: 8,
   },
   unreadGlowDot: {
     width: 8,
@@ -672,8 +965,8 @@ const styles = StyleSheet.create({
     paddingVertical: 60,
   },
   emptyTitle: {
-    fontSize: 17,
-    fontWeight: '600',
+    fontSize: 16,
+    fontWeight: '700',
     marginTop: 14,
   },
   emptySub: {
@@ -743,9 +1036,9 @@ const styles = StyleSheet.create({
     marginBottom: 12,
   },
   serviceDrawerCard: {
-    borderRadius: 16,
-    padding: 14,
-    marginBottom: 10,
+    borderRadius: 14,
+    padding: 12,
+    marginBottom: 8,
     borderWidth: 1,
   },
   serviceDrawerHeaderRow: {
@@ -800,5 +1093,68 @@ const styles = StyleSheet.create({
   footerText: {
     fontSize: 11,
     marginLeft: 6,
+  },
+  modalBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.7)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 24,
+  },
+  detailModalCard: {
+    width: '100%',
+    maxWidth: 400,
+    borderRadius: 20,
+    padding: 20,
+    borderWidth: 1,
+  },
+  detailHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  detailLogoImg: {
+    width: 36,
+    height: 36,
+    borderRadius: 10,
+  },
+  detailDefaultLogo: {
+    width: 36,
+    height: 36,
+    borderRadius: 10,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  detailServiceTitle: {
+    fontSize: 15,
+    fontWeight: '700',
+  },
+  detailDateTxt: {
+    fontSize: 11,
+    marginTop: 2,
+  },
+  closeDetailBtn: {
+    padding: 6,
+    borderRadius: 14,
+    borderWidth: 1,
+  },
+  detailDivider: {
+    height: 1,
+    marginVertical: 14,
+  },
+  detailMessageTxt: {
+    fontSize: 15,
+    lineHeight: 22,
+    marginBottom: 20,
+  },
+  detailDoneBtn: {
+    paddingVertical: 12,
+    borderRadius: 12,
+    alignItems: 'center',
+  },
+  detailDoneTxt: {
+    color: '#ffffff',
+    fontSize: 14,
+    fontWeight: '700',
   },
 });

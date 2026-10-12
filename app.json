@@ -39,6 +39,13 @@
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true
-    }
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "7ce1f80e-7b13-4325-9d4c-c9b649e447ed"
+      }
+    },
+    "owner": "official.idev.uz"
   }
 }

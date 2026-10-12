@@ -39,14 +39,7 @@ export default function LoginScreen() {
 
     setLoading(true);
     try {
-      let deviceToken: string | null = null;
-      try {
-        deviceToken = await getDeviceToken();
-      } catch (tokenErr) {
-        console.warn('⚠️ [Login] Device token olishda xatolik:', tokenErr);
-        deviceToken = null;
-      }
-
+      const deviceToken = await getDeviceToken();
       await authService.login(phone, password, deviceToken);
       setLoading(false);
 
