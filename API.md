@@ -1,264 +1,190 @@
-# Authenticator API Documentation
+# Authenticator API Reference
 
-Phone-number authentication service with **JWT access + refresh tokens**, **user roles**,
-and a **notification API** (stored notifications + FCM push) that lets service owners
-send messages to users.
+Phone-number authentication service (JWT access + refresh tokens) with a
+notification API: partner "services" can push messages to users, and owners
+can broadcast to everyone. Push delivery goes through Firebase Cloud
+Messaging (FCM).
 
-> **Version:** v2.0 · **Last verified against source:** 2026-10-03
->
-> **Changelog**
-> - **v2.0** — ⚠️ *breaking changes*
->   - `POST /users/login` now returns **`404`** when the phone number is not registered
->     (previously `401`); `401` now means *wrong password* only.
->   - Service endpoints **moved** from `/api/v1/services/register` and `/api/v1/messages/send`
->     to **`/services/register`** and **`/services/messages/send`**.
->   - Service endpoints now require an **`OWNER`** user's access token (`403` for everyone else).
->   - `POST /services/register` is now `multipart/form-data` (optional **logo upload**) and returns `201`.
->   - Messages are now also sent as **FCM push notifications**; response has a new `push_sent` field.
->   - New: user **roles**, static file serving at `/static/...`.
-> - **v1.1** — added `POST /users/logout`.
+> **Version:** v1 · **Verified against source:** 2026-10-14
+> Every path, field, status code and error string below was checked against
+> the code in `main.py`, `routers/*`, `schemas.py`, `models.py`, `deps.py`,
+> `security.py` and `services/*`. Anything that does **not** behave the way
+> you would expect is called out in a **Caveat** box and collected in
+> [Known issues](#13-known-issues).
 
 ---
 
-## Table of contents
+## Contents
 
-1. [Quick start (for frontend / mobile)](#1-quick-start-for-frontend--mobile)
-2. [General conventions](#2-general-conventions)
-3. [Authentication model](#3-authentication-model)
-4. [Users API](#4-users-api)
-   - [Register](#41-register)
-   - [Login](#42-login)
-   - [Refresh tokens](#43-refresh-tokens)
-   - [Current user](#44-current-user-)
-   - [Logout](#45-logout-)
-5. [Notifications API](#5-notifications-api)
-   - [List notifications](#51-list-notifications-)
-   - [Mark as read](#52-mark-as-read-)
-6. [Services API (OWNER only)](#6-services-api-owner-only)
-   - [Register a service](#61-register-a-service--owner)
-   - [Send a message](#62-send-a-message--owner)
-   - [Static files (logos)](#63-static-files-logos)
-7. [Health checks](#7-health-checks)
-8. [Data models](#8-data-models)
-9. [Errors](#9-errors)
-10. [Troubleshooting](#10-troubleshooting)
-11. [Frontend integration example](#11-frontend-integration-example)
-
-Legend: 🔒 = requires `Authorization: Bearer <access_token>` · 👑 = additionally requires role `OWNER`.
+1. [Overview](#1-overview)
+2. [Endpoint summary](#2-endpoint-summary)
+3. [Authentication & authorization](#3-authentication--authorization)
+4. [Users](#4-users)
+5. [Notifications](#5-notifications)
+6. [Services (owner only)](#6-services-owner-only)
+7. [Static files](#7-static-files)
+8. [Health checks](#8-health-checks)
+9. [Data models](#9-data-models)
+10. [Errors](#10-errors)
+11. [Push notifications (FCM)](#11-push-notifications-fcm)
+12. [Client integration guide](#12-client-integration-guide)
+13. [Known issues](#13-known-issues)
+14. [Configuration](#14-configuration)
 
 ---
 
-## 1. Quick start (for frontend / mobile)
+## 1. Overview
 
-```text
-┌──────────┐   POST /api/v1/users/register  or  /login      ┌────────┐
-│  Client  │ ─────────────────────────────────────────────▶ │  API   │
-│          │ ◀───────────────  access_token + refresh_token │        │
-│          │                                                │        │
-│          │   GET /api/v1/users/me                         │        │
-│          │   Authorization: Bearer <access_token>  ─────▶ │        │
-│          │                                                │        │
-│          │   access token expired (401)?                  │        │
-│          │   POST /api/v1/users/refresh {refresh_token} ─▶│        │
-│          │ ◀───────────  NEW access_token + refresh_token │        │
-│          │                                                │        │
-│          │   POST /api/v1/users/logout                    │        │
-│          │   Authorization: Bearer <access_token>  ─────▶ │        │
-│          │ ◀─────────────  refresh token revoked on server│        │
-│          │   (client then deletes both tokens locally)    │        │
-└──────────┘                                                └────────┘
-```
-
-**The 6 rules that avoid 95% of integration problems:**
-
-1. Send **JSON** (`Content-Type: application/json`), **not** form data — *except*
-   `POST /services/register`, which is `multipart/form-data`.
-   Login does **not** use `username`/`password` — the fields are `phone_number` and `password`.
-2. Send the phone number in **exactly the same format** on register and login
-   (recommended: `+998901234567`). The server does **not** normalize it, and a different
-   format is treated as "not registered" (`404`) — see [Phone number format](#phone-number-format).
-3. Send the **access** token as `Authorization: Bearer <access_token>`
-   (never the refresh token, no quotes, no missing `Bearer ` prefix).
-4. **Always save the newest `refresh_token`** — every `/refresh` (and every login)
-   invalidates the previous one.
-5. Call URLs **without a trailing slash** (`/api/v1/notifications`, not `/api/v1/notifications/`).
-6. On logout, call `POST /api/v1/users/logout` **and** delete both tokens on the device.
-   The server cannot revoke an access token — see [Logout](#45-logout-).
-
-### Endpoint overview
-
-| Method | Path | Auth | Role | Description |
-|---|---|---|---|---|
-| `POST` | `/api/v1/users/register` | – | – | Create account, get tokens |
-| `POST` | `/api/v1/users/login` | – | – | Log in, get tokens |
-| `POST` | `/api/v1/users/refresh` | refresh token (body) | – | Rotate tokens |
-| `POST` | `/api/v1/users/logout` | 🔒 | – | Revoke refresh token |
-| `GET` | `/api/v1/users/me` | 🔒 | – | Current user |
-| `GET` | `/api/v1/notifications` | 🔒 | – | List my notifications |
-| `PATCH` | `/api/v1/notifications/{id}/read` | 🔒 | – | Mark notification as read |
-| `POST` | `/services/register` | 🔒 | 👑 `OWNER` | Register a service (+ optional logo) |
-| `POST` | `/services/messages/send` | 🔒 | 👑 `OWNER` | Send a notification (+ push) to a user |
-| `GET` | `/static/{filename}` | – | – | Uploaded logos |
-| `GET` | `/`, `/health` | – | – | Health checks |
-
-> ⚠️ Note that the service endpoints live under **`/services`**, *not* under `/api/v1`.
-
----
-
-## 2. General conventions
-
-### Base URL
-
-| Environment | URL |
+| | |
 |---|---|
-| Local | `http://127.0.0.1:8000` |
-| Production | `https://<your-vercel-project>.vercel.app` |
+| **Base URL (local)** | `http://127.0.0.1:8000` |
+| **Base URL (production)** | `https://<your-vercel-project>.vercel.app` |
+| **Interactive docs** | `GET /docs` (Swagger UI), `GET /redoc`, `GET /openapi.json` |
+| **Content type** | `application/json`, except [`POST /services/register`](#61-register-a-service) which is `multipart/form-data` |
+| **Timestamps** | ISO 8601 with timezone, always UTC (e.g. `2026-10-14T09:30:11.482913+00:00`) |
+| **IDs** | UUID v4 strings |
+| **CORS** | Controlled by `CORS_ORIGINS` (default `*`), credentials allowed, all methods and headers |
+| **Pagination / rate limiting** | None |
 
-Interactive Swagger UI: `GET /docs` · Raw OpenAPI schema: `GET /openapi.json`
+Legend used below: **Auth: Bearer** means the request needs
+`Authorization: Bearer <access_token>`.
 
-### Requests & responses
-
-| Item | Value |
-|---|---|
-| Format | JSON (`Content-Type: application/json`); `multipart/form-data` only for `POST /services/register` |
-| Success status | `200 OK` for every endpoint, except `POST /services/register` → `201 Created` |
-| IDs | UUID v4 strings |
-| Timestamps | ISO 8601, UTC (e.g. `2026-09-26T14:02:11.482913+00:00`) |
-| CORS | Controlled by the `CORS_ORIGINS` env var (`*` by default) |
-| Error messages | The `detail` text is in **Uzbek** (see [Errors](#9-errors)) |
-
-### Phone number format
-
-The phone number is stored and compared as an **exact string** — there is no
-trimming, no removal of spaces and no country-code normalization on the server.
-
-| Sent at register | Sent at login | Result |
-|---|---|---|
-| `+998901234567` | `+998901234567` | ✅ works |
-| `+998901234567` | `998901234567` | ❌ `404` (treated as a different, unregistered number) |
-| `+998901234567` | `+998 90 123 45 67` | ❌ `404` |
-| `+998901234567` | `+998901234567 ` (trailing space) | ❌ `404` |
-
-**Recommendation:** normalize on the client before every request (digits only,
-prefixed with `+`, no spaces/dashes/brackets). Max length is **20 characters**.
-The same exact-match rule applies to `user_phone` in [Send a message](#62-send-a-message--owner).
-
-### Trailing slashes
-
-`POST /api/v1/users/login/` (with `/`) does **not** return the login response —
-it returns a `307` redirect to the URL without the slash. Some HTTP clients drop
-the `Authorization` header or change the scheme when following redirects. Always
-call the exact paths shown in this document.
+> **Caveat – URL prefixes are not uniform.** Users and notifications live
+> under `/api/v1/...`, but the services endpoints are mounted at
+> `/services/...` (no `/api/v1`). Use the paths exactly as listed here.
 
 ---
 
-## 3. Authentication model
+## 2. Endpoint summary
 
-The API uses these kinds of credentials:
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| `POST` | `/api/v1/users/register` | none | Create account, returns tokens |
+| `POST` | `/api/v1/users/login` | none | Log in, returns tokens |
+| `POST` | `/api/v1/users/refresh` | refresh token in body | Rotate token pair |
+| `POST` | `/api/v1/users/logout` | Bearer | Invalidate refresh token |
+| `GET` | `/api/v1/users/me` | Bearer | Current user |
+| `GET` | `/api/v1/notifications` | Bearer | List my notifications |
+| `PATCH` | `/api/v1/notifications/{notification_id}/read` | Bearer | Mark one notification read |
+| `POST` | `/services/register` | Bearer, role `owner` | Create a service (+ optional logo) |
+| `GET` | `/services/get` | Bearer, role `owner` | List all services |
+| `POST` | `/services/messages/send` | Bearer, role `owner` + service token | Send a message to one user |
+| `POST` | `/services/broadcast` | Bearer, role `owner` | Push to every user — **currently broken, see [6.4](#64-broadcast-to-all-users)** |
+| `GET` | `/static/{filename}` | none | Uploaded service logos |
+| `GET` | `/` | none | Welcome / status |
+| `GET` | `/health` | none | Health check |
 
-| Credential | Used by | How it is sent |
+---
+
+## 3. Authentication & authorization
+
+### 3.1 Credentials
+
+| Credential | Held by | Sent as |
 |---|---|---|
-| **Access token** (JWT) | Everyone logged in (mobile / web app, service owners) | `Authorization: Bearer <access_token>` header |
-| **Refresh token** (JWT) | End users, **only** for `POST /api/v1/users/refresh` | JSON body |
-| **Service token** | Used **together with** an OWNER's access token in `POST /services/messages/send` | JSON body (`service_id` + `token`) |
+| **Access token** (JWT) | Every logged-in client | `Authorization: Bearer <access_token>` |
+| **Refresh token** (JWT) | Every logged-in client | JSON body of `POST /api/v1/users/refresh` only |
+| **Service token** (`srv_token_…`) | Whoever operates a registered service | `token` field in the body of `POST /services/messages/send` |
 
-### Tokens
+Register, login and refresh all return an access **and** a refresh token.
+
+### 3.2 Token details
 
 | | Access token | Refresh token |
 |---|---|---|
-| Lifetime (defaults) | **30 days** (`ACCESS_TOKEN_EXPIRE_DAYS`) | **60 days** (`REFRESH_TOKEN_EXPIRE_DAYS`) |
-| Algorithm | HS256 | HS256 |
-| Claims | `sub` (user id), `phone_number`, `exp`, `type: "access"` | `sub` (user id), `exp`, `type: "refresh"` |
-| Accepted by | All 🔒 endpoints | `POST /users/refresh` only |
+| Algorithm | HS256 (configurable via `ALGORITHM`) | same |
+| Lifetime | `ACCESS_TOKEN_EXPIRE_DAYS`, default **30 days** | `REFRESH_TOKEN_EXPIRE_DAYS`, default **60 days** |
+| `type` claim | `"access"` | `"refresh"` |
+| Other claims | `sub` (user id), `phone_number`, `exp` | `sub` (user id), `exp` |
+| Accepted by | every Bearer-protected endpoint | `/refresh` only |
 
-The `type` claim is enforced: a refresh token is **rejected** on 🔒 endpoints and
-an access token is **rejected** on `/refresh`.
+The `type` claim is enforced: a refresh token sent as a Bearer token is
+rejected with `401`, and an access token sent to `/refresh` is rejected with
+`401`.
 
-### Refresh-token rotation (important)
+### 3.3 Refresh-token rotation
 
-The server stores a hash of **one** refresh token per user — the most recently issued one.
-A new refresh token is issued on **register**, **login** and **refresh**; each time,
-the previous refresh token stops working immediately.
+The server stores a SHA-256 hash of **one** refresh token per user. Every
+call to register, login or refresh overwrites it. Consequences:
 
-Consequences for the client:
+- After `/refresh`, the previous refresh token is dead immediately. Replaying
+  it returns `401`.
+- **Only one session per user.** Logging in on a second device issues a new
+  refresh token and silently invalidates the first device's refresh token.
+  The first device keeps working until its access token expires, then fails
+  to refresh.
+- Two parallel `/refresh` calls with the same token will race: one wins, the
+  other gets `401`. Clients must serialise refreshes (see
+  [12.2](#122-token-handling-with-automatic-refresh)).
+- `POST /logout` clears the stored hash, so the refresh token stops working.
+  It does **not** revoke the access token, which stays valid until it
+  expires (see [Known issues](#13-known-issues)).
 
-- **Always replace the stored refresh token** with the one from the latest response.
-- **Single device per user for refresh:** logging in on device B invalidates device A's
-  refresh token. Device A's current *access* token keeps working until it expires,
-  but once it does, device A must log in again.
-- **Never run two `/refresh` calls at once.** If two requests fire in parallel with the
-  same refresh token, the second one gets `401`. Queue them behind a single in-flight
-  refresh (see [example](#11-frontend-integration-example)).
-- **Logout clears that one stored hash**, so it signs the user out of refresh on **all**
-  devices at once (there is no per-device session). See [Logout](#45-logout-).
-- There is **no OTP, SMS or Telegram step** — register and login are immediate.
+### 3.4 Roles
 
-### Logout and access tokens (important)
-
-Access tokens are stateless JWTs: the server does **not** keep a list of them, so it
-cannot revoke one. After `POST /users/logout`:
-
-| Token | Still works? |
-|---|---|
-| **Refresh token** (any device) | ❌ No — `/refresh` returns `401` |
-| **Access token** (any device) | ✅ **Yes**, until it expires (up to 30 days by default) |
-
-So "logged out" means *"can no longer obtain new tokens"*. The client **must** delete both
-tokens locally; otherwise the old access token still works against 🔒 endpoints.
-
-### Roles and permissions
-
-Every user has exactly one role:
-
-| Role | How a user gets it | Permissions |
+| Role | Value in responses | How to get it |
 |---|---|---|
-| `USER` | Default for everyone who registers | Everything under `/api/v1/users` and `/api/v1/notifications` |
-| `OWNER` | Assigned **manually in the database** (`users.role`) — there is no API for it | Everything a `USER` can do **plus** `POST /services/register` and `POST /services/messages/send` |
+| User | `"user"` | Default for every new registration |
+| Owner | `"owner"` | Set directly in the database; there is no endpoint to change roles |
 
-Things to know:
+Promoting a user (check the enum labels in your DB first, since SQLAlchemy
+stores enum *names* by default):
 
-- **The role is not returned by any endpoint** — not by login/register/refresh (`user` object)
-  and not by `/users/me`. A client can only discover that a user lacks permission by getting
-  **`403`**. Treat `403` as "not allowed" and hide owner-only UI accordingly.
-- Registration always creates a `USER`; an account can't promote itself.
-- The role is checked on **every request** from the database, so a promotion/demotion takes
-  effect immediately (no need to log in again).
-- `403` means *authenticated but not allowed* — **do not** refresh the token or log the user out.
+```sql
+SELECT unnest(enum_range(NULL::userrole));          -- see which labels exist
+UPDATE users SET role = 'OWNER' WHERE phone_number = '+998901234567';
+```
+
+The code also references an `ADMIN` role in one place, but the role enum
+only defines `OWNER` and `USER` (see [6.4](#64-broadcast-to-all-users)).
+
+### 3.5 Missing or invalid Bearer token
+
+| Situation | Status | Body |
+|---|---|---|
+| No `Authorization` header | `401` | `{"detail": "Not authenticated"}` |
+| Malformed, expired, wrong signature, wrong `type`, or user no longer exists | `401` | `{"detail": "Token yaroqsiz yoki muddati o'tgan!"}` plus header `WWW-Authenticate: Bearer` |
+
+> **Note on Swagger UI:** the "Authorize" button in `/docs` posts a
+> form-encoded `username`/`password` to `/api/v1/users/login`, but that
+> endpoint takes JSON with `phone_number`. Authorizing through the dialog
+> will not work. Log in via the endpoint, then paste the `access_token` into
+> the dialog's token field, or send the header yourself.
 
 ---
 
-## 4. Users API
+## 4. Users
 
 Base path: `/api/v1/users`
 
 ### 4.1 Register
 
-Creates the account immediately (role `USER`) and returns tokens.
+Creates the account immediately and returns tokens. There is no OTP, SMS or
+confirmation step.
 
-```http
+```
 POST /api/v1/users/register
-Content-Type: application/json
 ```
 
-**Body**
+**Body (JSON)**
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `full_name` | string | ✅ | Max 250 characters |
-| `phone_number` | string | ✅ | Max 20 characters, must be unique. See [format](#phone-number-format) |
-| `password` | string | ✅ | Max **72 bytes** (bcrypt limit). Stored as a bcrypt hash |
-| `device_token` | string | ❌ | FCM device token — **used for push notifications**, saved on the user |
+| `full_name` | string | yes | Max 250 characters in the database |
+| `phone_number` | string | yes | Unique; max 20 characters in the database. **No format validation**, so keep the format consistent (e.g. E.164 `+998901234567`) because lookups are exact string matches |
+| `password` | string | yes | Hashed with bcrypt. No length or strength rules are enforced |
+| `device_token` | string | no | FCM registration token for push notifications |
 
 ```json
 {
   "full_name": "Ibrohim Aliyev",
   "phone_number": "+998901234567",
   "password": "S3cur3Pass!",
-  "device_token": "fcm_device_token_here"
+  "device_token": "fcm-device-token-from-the-app"
 }
 ```
 
-**Response `200`** — see [`TokenResponse`](#tokenresponse)
+**Response `200`** ([`TokenResponse`](#token-response))
 
 ```json
 {
@@ -269,22 +195,23 @@ Content-Type: application/json
   "user": {
     "id": "5b1f7e2a-9c3d-4e21-8a4f-2d6c1f9b7a10",
     "full_name": "Ibrohim Aliyev",
-    "phone_number": "+998901234567"
+    "phone_number": "+998901234567",
+    "role": "user"
   }
 }
 ```
+
+> Note that it returns `200`, not `201`.
 
 **Errors**
 
 | Status | `detail` | Cause |
 |---|---|---|
 | `400` | `Ushbu telefon raqam allaqachon ro'yxatdan o'tgan!` | Phone number already registered |
-| `422` | *(validation array)* | Missing/invalid field |
-
-**cURL**
+| `422` | validation array | Missing or wrong-typed field |
 
 ```bash
-curl -X POST http://127.0.0.1:8000/api/v1/users/register \
+curl -X POST "$BASE/api/v1/users/register" \
   -H "Content-Type: application/json" \
   -d '{"full_name":"Ibrohim Aliyev","phone_number":"+998901234567","password":"S3cur3Pass!"}'
 ```
@@ -293,132 +220,92 @@ curl -X POST http://127.0.0.1:8000/api/v1/users/register \
 
 ### 4.2 Login
 
-```http
+```
 POST /api/v1/users/login
-Content-Type: application/json
 ```
 
-**Body**
+**Body (JSON)**
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `phone_number` | string | ✅ | Must match the registered value **exactly** |
-| `password` | string | ✅ | |
-| `device_token` | string | ❌ | If provided, replaces the stored FCM device token |
+| `phone_number` | string | yes | |
+| `password` | string | yes | |
+| `device_token` | string | no | If provided and non-empty, **replaces** the stored device token |
 
 ```json
-{
-  "phone_number": "+998901234567",
-  "password": "S3cur3Pass!"
-}
+{ "phone_number": "+998901234567", "password": "S3cur3Pass!" }
 ```
 
-**Response `200`** — same shape as [Register](#41-register). A new access/refresh
-pair is issued and **replaces** the user's previous refresh token.
+**Response `200`**: same shape as [Register](#41-register). A new token pair
+is issued and replaces the user's previous refresh token (see
+[3.3](#33-refresh-token-rotation)).
 
 **Errors**
 
 | Status | `detail` | Cause |
 |---|---|---|
-| `404` | `Bunday telefon raqam avval ro'yxatdan o'tmagan!` | **No user with this exact `phone_number`** (not registered, or sent in a different format) |
-| `401` | `Telefon raqam yoki parol noto'g'ri!` | Phone number exists, but the **password is wrong** |
-| `422` | *(validation array)* | Body is not JSON / a field is missing (e.g. you sent `username` or form-data) |
+| `404` | `Bunday telefon raqam avval ro'yxatdan o'tmagan!` | No account with this phone number |
+| `401` | `Telefon raqam yoki parol noto'g'ri!` | Wrong password |
+| `422` | validation array | Missing or wrong-typed field |
 
-> 💡 Since v2.0 the two failure cases are distinguishable:
-> **`404` → phone problem**, **`401` → password problem**. A UI can use `404` to suggest
-> "Sign up" instead. (Note this also reveals whether a number is registered.)
-> See [Troubleshooting](#10-troubleshooting).
-
-**cURL**
+> **Caveat:** because unknown numbers return `404` and wrong passwords return
+> `401`, the endpoint reveals which phone numbers are registered.
+> `User.is_active` is stored but **not checked** at login.
 
 ```bash
-curl -X POST http://127.0.0.1:8000/api/v1/users/login \
+curl -X POST "$BASE/api/v1/users/login" \
   -H "Content-Type: application/json" \
-  -d '{"phone_number":"+998901234567","password":"S3cur3Pass!"}'
+  -d '{"phone_number":"+998901234567","password":"S3cur3Pass!","device_token":"fcm-..."}'
 ```
 
 ---
 
-### 4.3 Refresh tokens
+### 4.3 Refresh
 
-Exchanges a valid refresh token for a **new** access token **and** a **new** refresh token.
-Use it when the access token has expired (or is about to) instead of sending the user
-back to the login screen.
+Exchanges a valid, not-yet-superseded refresh token for a new access +
+refresh pair. The old refresh token stops working immediately.
 
-```http
+```
 POST /api/v1/users/refresh
-Content-Type: application/json
 ```
 
-**Body**
+**Body (JSON)**
 
-| Field | Type | Required | Notes |
-|---|---|---|---|
-| `refresh_token` | string | ✅ | The **latest** refresh token you received |
+| Field | Type | Required |
+|---|---|---|
+| `refresh_token` | string | yes |
 
 ```json
 { "refresh_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..." }
 ```
 
-**Response `200`** — same shape as [Register](#41-register). The old refresh token
-stops working immediately.
+**Response `200`**: same shape as [Register](#41-register).
 
 **Errors**
 
 | Status | `detail` | Cause |
 |---|---|---|
-| `401` | `Refresh token yaroqsiz yoki muddati o'tgan!` | Token malformed / expired / not of type `refresh` / already rotated / user logged in elsewhere / user logged out |
-| `422` | *(validation array)* | `refresh_token` missing |
+| `401` | `Refresh token yaroqsiz yoki muddati o'tgan!` | Bad signature, expired, not of type `refresh`, no/invalid `sub`, user not found, user logged out, or token already rotated |
+| `422` | validation array | `refresh_token` missing |
 
-On `401` from this endpoint, clear stored tokens and send the user to the login screen.
+```bash
+curl -X POST "$BASE/api/v1/users/refresh" \
+  -H "Content-Type: application/json" \
+  -d '{"refresh_token":"eyJ..."}'
+```
 
 ---
 
-### 4.4 Current user 🔒
+### 4.4 Logout
 
-Returns the account that owns the access token. Handy for checking on app start
-that a stored token is still valid.
+Clears the stored refresh-token hash so the current refresh token can no
+longer be used.
 
-```http
-GET /api/v1/users/me
-Authorization: Bearer <access_token>
 ```
-
-**Response `200`**
-
-```json
-{
-  "id": "5b1f7e2a-9c3d-4e21-8a4f-2d6c1f9b7a10",
-  "full_name": "Ibrohim Aliyev",
-  "phone_number": "+998901234567"
-}
-```
-
-> The user's `role` is **not** included in this response.
-
-**Errors**
-
-| Status | `detail` | Cause |
-|---|---|---|
-| `401` | `Not authenticated` | `Authorization` header missing, or not in `Bearer <token>` form |
-| `401` | `Token yaroqsiz yoki muddati o'tgan!` | Token invalid / expired / is a **refresh** token / user no longer exists |
-
-Both `401` responses include the header `WWW-Authenticate: Bearer`.
-
----
-
-### 4.5 Logout 🔒
-
-Signs the user out by deleting the server-side refresh-token hash. After this call no
-refresh token for this user can be exchanged at [`/refresh`](#43-refresh-tokens)
-until the user logs in again.
-
-```http
 POST /api/v1/users/logout
-Authorization: Bearer <access_token>
 ```
 
-No request body (anything sent is ignored).
+**Auth: Bearer**. No body.
 
 **Response `200`**
 
@@ -426,65 +313,66 @@ No request body (anything sent is ignored).
 { "detail": "Tizimdan muvaffaqiyatli chiqildi" }
 ```
 
-> ⚠️ This success response uses the key `detail` (like error responses) and has **no**
-> `status` field, unlike register/login/refresh. Decide success by the **HTTP status
-> code (`200`)**, not by the presence of `detail`.
+**Errors:** `401` (see [3.5](#35-missing-or-invalid-bearer-token)).
 
-**Errors**
-
-| Status | `detail` | Cause |
-|---|---|---|
-| `401` | `Not authenticated` | `Authorization` header missing, or not in `Bearer <token>` form |
-| `401` | `Token yaroqsiz yoki muddati o'tgan!` | Access token invalid / expired, or you sent the **refresh** token |
-| `405` | `Method Not Allowed` | Called with `GET` instead of `POST` |
-
-**Behavior to know about**
-
-| Topic | What happens |
-|---|---|
-| Scope | Affects **all devices** of the user — there is one refresh-token hash per user, so logging out on one device also kills the refresh token of every other device |
-| Refresh after logout | `POST /users/refresh` → `401` (`Refresh token yaroqsiz yoki muddati o'tgan!`) |
-| Access token after logout | Keeps working until it expires — see [Logout and access tokens](#logout-and-access-tokens-important) |
-| Repeating the call | Harmless — returns `200` again while the access token is still valid |
-| Device token | `device_token` is **not** cleared. Since push is now live, **a logged-out device keeps receiving push notifications** for this account until another login/register sends a new `device_token` |
-| Logging in again | Works normally; issues a fresh access/refresh pair |
-| Expired access token | `/logout` returns `401` and the refresh token is **not** revoked (it stays valid on the server until it expires). To revoke it, call [`/refresh`](#43-refresh-tokens) first, then `/logout` with the new access token — or accept that a locally deleted token is enough |
-
-**Recommended client flow**
-
-```text
-1. POST /api/v1/users/logout   (best effort — ignore network errors / 401;
-                                 a 401 here means the refresh token was NOT revoked)
-2. Delete access_token and refresh_token from storage
-3. Clear in-memory user state and cached notifications
-4. Navigate to the login screen
-```
-
-Always do steps 2–4 **even if step 1 fails**, so the UI never gets stuck logged in.
-
-**cURL**
+> **Caveat:** logout does **not** invalidate the access token (it stays valid
+> until `exp`) and does **not** clear `device_token`, so the device keeps
+> receiving push notifications for that account after logout. The client
+> should discard both tokens locally.
 
 ```bash
-curl -X POST http://127.0.0.1:8000/api/v1/users/logout \
-  -H "Authorization: Bearer <access_token>"
+curl -X POST "$BASE/api/v1/users/logout" -H "Authorization: Bearer $ACCESS"
 ```
 
 ---
 
-## 5. Notifications API
+### 4.5 Current user
 
-Base path: `/api/v1/notifications` — every endpoint requires a user's **access
-token** and only ever touches **that user's** notifications.
-
-### 5.1 List notifications 🔒
-
-```http
-GET /api/v1/notifications
-Authorization: Bearer <access_token>
+```
+GET /api/v1/users/me
 ```
 
-**Response `200`** — array of [`Notification`](#notification), **newest first**
-(no pagination yet — the full list is returned).
+**Auth: Bearer**
+
+**Response `200`** ([`User`](#user))
+
+```json
+{
+  "id": "5b1f7e2a-9c3d-4e21-8a4f-2d6c1f9b7a10",
+  "full_name": "Ibrohim Aliyev",
+  "phone_number": "+998901234567",
+  "role": "user"
+}
+```
+
+**Errors:** `401`. Useful for checking on app start whether a stored access
+token is still valid.
+
+```bash
+curl "$BASE/api/v1/users/me" -H "Authorization: Bearer $ACCESS"
+```
+
+---
+
+## 5. Notifications
+
+Base path: `/api/v1/notifications`. All endpoints need a Bearer token and
+only ever touch the caller's own notifications.
+
+Notifications are created by [`POST /services/messages/send`](#62-send-a-message).
+Broadcasts are **not** stored (see [6.4](#64-broadcast-to-all-users)).
+
+### 5.1 List notifications
+
+```
+GET /api/v1/notifications
+```
+
+**Auth: Bearer**
+
+**Response `200`**: array of [`Notification`](#notification), newest first
+(`sent_at` descending). The whole list is returned; there is no pagination
+or filtering. An empty array means no notifications.
 
 ```json
 [
@@ -493,157 +381,149 @@ Authorization: Bearer <access_token>
     "service_id": "8f2a1c3d-4b5e-4f6a-9d7c-1e2b3a4c5d6e",
     "message": "To'lovingiz muvaffaqiyatli amalga oshirildi.",
     "is_read": false,
-    "sent_at": "2026-09-26T14:02:11.482913+00:00"
+    "sent_at": "2026-10-14T09:30:11.482913+00:00"
   }
 ]
 ```
 
-An empty array `[]` means the user has no notifications.
+> **Caveat:** a notification only carries `service_id`. Regular users have no
+> endpoint to look up a service's name or logo (`GET /services/get` is
+> owner-only). Either ship the service list with the app, or add a public
+> lookup endpoint.
 
-> ℹ️ Each item contains only the `service_id`. **No endpoint currently returns a service's
-> `title` or `logo_url`**, so the app can't resolve the sender's name/logo from the API yet.
-> (The push notification itself carries the service title.)
-
-**Errors:** `401` (see [Current user](#44-current-user-)).
-
-> ⚠️ Use `/api/v1/notifications` **without** a trailing slash — with one, the server
-> answers `307` (redirect) instead of the data.
+```bash
+curl "$BASE/api/v1/notifications" -H "Authorization: Bearer $ACCESS"
+```
 
 ---
 
-### 5.2 Mark as read 🔒
+### 5.2 Mark as read
 
-```http
+```
 PATCH /api/v1/notifications/{notification_id}/read
-Authorization: Bearer <access_token>
 ```
 
-| Path param | Type | Notes |
+**Auth: Bearer**
+
+| Path parameter | Type | Notes |
 |---|---|---|
-| `notification_id` | UUID | Notification `id` from the list |
+| `notification_id` | UUID | A non-UUID value returns `422` |
 
-No request body.
-
-**Response `200`** — the updated [`Notification`](#notification) with `"is_read": true`.
-Calling it again on an already-read notification is harmless.
+**Response `200`**: the updated [`Notification`](#notification) with
+`"is_read": true`. The call is idempotent.
 
 **Errors**
 
 | Status | `detail` | Cause |
 |---|---|---|
-| `401` | see above | Missing/invalid access token |
-| `404` | `Bildirishnoma topilmadi` | Notification doesn't exist **or belongs to another user** |
-| `422` | *(validation array)* | `notification_id` is not a valid UUID |
+| `404` | `Bildirishnoma topilmadi` | Doesn't exist, or belongs to another user |
+| `401` | see [3.5](#35-missing-or-invalid-bearer-token) | |
+| `422` | validation array | `notification_id` is not a UUID |
+
+There is no "mark all as read" and no delete endpoint.
+
+```bash
+curl -X PATCH "$BASE/api/v1/notifications/$NOTIF_ID/read" \
+  -H "Authorization: Bearer $ACCESS"
+```
 
 ---
 
-## 6. Services API (OWNER only)
+## 6. Services (owner only)
 
-Base path: **`/services`** (not `/api/v1`)
+Base path: `/services`
 
-A *service* is a sender identity (e.g. a savings app, an e-commerce app) on whose behalf
-notifications are delivered to users. Both endpoints below require:
+A **service** is an external app (a savings app, a shop, etc.) on whose
+behalf messages are delivered to users. Every endpoint in this section
+requires a Bearer token belonging to a user with role `owner`; other roles get
+`403`.
 
-1. a valid **access token** (`Authorization: Bearer ...`), **and**
-2. the caller's role to be **`OWNER`** — otherwise `403`.
+> **Caveat – the service token is not a standalone credential.** Sending a
+> message needs an **owner's access token** *and* the matching
+> `service_id` + `token` in the body. A partner backend that only holds a
+> service token cannot call the API on its own; it would have to hold an
+> owner login too. See [Known issues](#13-known-issues).
 
-> ℹ️ **Flow for a partner backend:** the partner uses an `OWNER` account to log in
-> (`/api/v1/users/login`), keeps its tokens fresh via `/refresh`, and calls these endpoints
-> with that access token **plus** the service's own `service_id`/`token` pair in the body
-> of `messages/send`. The service `token` alone is no longer enough.
->
-> These endpoints are **not for end-user apps** — don't ship the service `token` or an
-> owner account in a client app.
+### 6.1 Register a service
 
-### 6.1 Register a service 🔒 👑
+Creates a service, optionally with a logo, and returns its token.
 
-Creates a service and returns a permanent `token`. **The token is shown only once** —
-store it securely.
-
-```http
+```
 POST /services/register
-Authorization: Bearer <owner_access_token>
 Content-Type: multipart/form-data
 ```
 
+**Auth: Bearer, role `owner`**
+
 **Form fields**
 
-| Field | Type | Required | Rules |
+| Field | Type | Required | Constraints |
 |---|---|---|---|
-| `name` | string | ✅ | **3–50** characters, must be unique (e.g. `jamgarma_app`) |
-| `title` | string | ✅ | **2–150** characters (display name; also used as the **push notification title**) |
-| `about` | string | ❌ | Free text |
-| `logo` | file | ❌ | Image file; extension must be `.jpg`, `.jpeg`, `.png` or `.webp` (case-insensitive) |
+| `name` | string | yes | 3–50 chars, **unique**, e.g. `jamgarma_app` |
+| `title` | string | yes | 2–150 chars. Shown as the push notification title |
+| `about` | string | no | Free text |
+| `logo` | file | no | Extension must be `.jpg`, `.jpeg`, `.png` or `.webp` (checked by filename only). No size limit |
 
-> The file type is validated **by extension only** (not by content), and the API sets no
-> explicit size limit — keep logos small (serverless platforms cap request bodies at a few MB).
-
-**Response `201 Created`**
+**Response `201`**
 
 ```json
 {
   "status": "success",
   "service_id": "8f2a1c3d-4b5e-4f6a-9d7c-1e2b3a4c5d6e",
-  "token": "srv_token_a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6"
+  "token": "srv_token_3f9a1c7e5b2d8f40a6c1e9b7d3f5a2c8e4b6d0f1a9c7e5b3"
 }
 ```
 
-If a logo was uploaded, it is saved under a random name and the service's `logo_url` is
-stored as a **relative** path such as `/static/3f9c1d7e-....png` (see
-[Static files](#63-static-files-logos)). The response does **not** include `logo_url`.
-
-> ⚠️ **Logos on Vercel are not persistent.** On Vercel, uploads are written to `/tmp`,
-> which is temporary and per-instance: logo files can disappear after a cold start or
-> redeploy, and `/static/...` then returns `404`. For production, store logos in external
-> object storage (S3, Firebase Storage, Supabase Storage, …).
+The token is `srv_token_` followed by 48 hex characters. The logo is stored
+on the server and `logo_url` is set to `/static/<uuid>.<ext>` (see
+[Static files](#7-static-files)); the response does not echo `logo_url`, use
+[`GET /services/get`](#63-list-services) to read it.
 
 **Errors**
 
 | Status | `detail` | Cause |
 |---|---|---|
-| `401` | `Not authenticated` / `Token yaroqsiz yoki muddati o'tgan!` | Missing/invalid access token |
-| `403` | `Ushbu amalni bajarish uchun sizda yetarli huquq yo'q.` | Caller is not an `OWNER` |
+| `403` | `Ushbu amalni bajarish uchun sizda yetarli huquq yo'q.` | Caller is not `owner` |
 | `400` | `Bunday nomli servis allaqachon ro'yxatdan o'tgan.` | `name` already taken |
-| `400` | `Faqat rasm fayllari (.jpg, .jpeg, .png, .webp) qabul qilinadi.` | Unsupported logo extension |
-| `422` | *(validation array)* | `name`/`title` missing or outside length limits, or the request was sent as JSON instead of form data |
-
-**cURL**
+| `400` | `Faqat rasm fayllari (.jpg, .jpeg, .png, .webp) qabul qilinadi.` | Disallowed logo extension |
+| `422` | validation array | Missing field, or length constraint violated |
+| `401` | see [3.5](#35-missing-or-invalid-bearer-token) | |
 
 ```bash
-curl -X POST http://127.0.0.1:8000/services/register \
-  -H "Authorization: Bearer <owner_access_token>" \
-  -F "name=jamgarma_app" \
-  -F "title=Jamg'arma Moliya Tashkiloti MCHJ" \
-  -F "about=Onlayn jamg'arma xizmati" \
-  -F "logo=@./logo.png"
+curl -X POST "$BASE/services/register" \
+  -H "Authorization: Bearer $ACCESS" \
+  -F name=jamgarma_app \
+  -F title="Jamg'arma Moliya Tashkiloti MCHJ" \
+  -F about="Onlayn jamg'arma xizmati" \
+  -F logo=@./logo.png
 ```
 
 ---
 
-### 6.2 Send a message 🔒 👑
+### 6.2 Send a message
 
-Stores a notification for the user with the given phone number and, if that user has a
-`device_token`, also sends an **FCM push notification**.
+Stores a notification for one user (identified by phone number) on behalf of
+an active service, then tries to deliver it as a push notification.
 
-```http
+```
 POST /services/messages/send
-Authorization: Bearer <owner_access_token>
-Content-Type: application/json
 ```
 
-**Body**
+**Auth: Bearer, role `owner`**
+
+**Body (JSON)**
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `service_id` | UUID | ✅ | From [Register a service](#61-register-a-service--owner) |
-| `token` | string | ✅ | That service's token |
-| `user_phone` | string | ✅ | Target user's phone — must match their registered value **exactly** |
-| `message` | string | ✅ | Notification text |
+| `service_id` | UUID | yes | From [Register a service](#61-register-a-service) |
+| `token` | string | yes | That service's token |
+| `user_phone` | string | yes | Recipient's phone number, exact match |
+| `message` | string | yes | Stored as text; used as the push body |
 
 ```json
 {
   "service_id": "8f2a1c3d-4b5e-4f6a-9d7c-1e2b3a4c5d6e",
-  "token": "srv_token_a1b2c3d4e5f6...",
+  "token": "srv_token_3f9a1c7e5b2d8f40a6c1e9b7d3f5a2c8e4b6d0f1a9c7e5b3",
   "user_phone": "+998901234567",
   "message": "To'lovingiz muvaffaqiyatli amalga oshirildi."
 }
@@ -659,73 +539,173 @@ Content-Type: application/json
 }
 ```
 
-| Field | Description |
+| Field | Meaning |
 |---|---|
 | `status` | Always `"success"` |
-| `message` | Always `"Xabar yetkazildi"` |
-| `push_sent` | `true` if Firebase accepted the push. `false` if the user has **no `device_token`**, or FCM failed / isn't configured on the server |
+| `message` | Always `"Xabar yetkazildi"` ("message delivered"). This only means the notification was **saved**; check `push_sent` for the push |
+| `push_sent` | `true` if FCM accepted the push. `false` if the user has no `device_token` **or** FCM failed. In both cases the notification is still saved and visible in [`GET /api/v1/notifications`](#51-list-notifications) |
 
-Important:
-
-- The notification is **saved in either case** — `push_sent: false` does **not** mean the
-  message wasn't delivered to the in-app list ([List notifications](#51-list-notifications-)).
-- Push content: **title** = the service's `title`, **body** = `message`.
-- `push_sent` does not report the device actually displaying the push, only that FCM accepted it.
-- Server-side, push requires Firebase credentials (Application Default Credentials, e.g. a
-  service-account JSON referenced by `GOOGLE_APPLICATION_CREDENTIALS`). Without them,
-  `push_sent` is always `false`.
+The push uses the service's `title` as its title and `message` as its body.
+The request waits for FCM to answer before returning.
 
 **Errors**
 
 | Status | `detail` | Cause |
 |---|---|---|
-| `401` | `Not authenticated` / `Token yaroqsiz yoki muddati o'tgan!` | Missing/invalid **access token** |
-| `403` | `Ushbu amalni bajarish uchun sizda yetarli huquq yo'q.` | Caller is not an `OWNER` |
-| `401` | `Yaroqsiz service_id yoki token!` | Wrong `service_id`/`token` pair, or the service is inactive |
+| `403` | `Ushbu amalni bajarish uchun sizda yetarli huquq yo'q.` | Caller is not `owner` |
+| `401` | `Yaroqsiz service_id yoki token!` | Unknown `service_id`, wrong `token`, or service is inactive |
 | `404` | `Ushbu telefon raqamli foydalanuvchi topilmadi` | No user with that phone number |
-| `422` | *(validation array)* | Missing field, or `service_id` isn't a UUID |
+| `422` | validation array | Missing field, or `service_id` is not a UUID |
 
-> ⚠️ **Two different `401`s.** `Yaroqsiz service_id yoki token!` is about the **service
-> credentials**, not the session — do **not** refresh the access token or log the owner out
-> because of it. Check the `detail` text before reacting to a `401`
-> (the [example client](#11-frontend-integration-example) does).
-
-**cURL**
+> This `401` is about the *service* credentials, so don't treat it as "access
+> token expired" and trigger a refresh loop; check the `detail` text, or just
+> don't auto-refresh on this endpoint.
 
 ```bash
-curl -X POST http://127.0.0.1:8000/services/messages/send \
-  -H "Authorization: Bearer <owner_access_token>" \
+curl -X POST "$BASE/services/messages/send" \
+  -H "Authorization: Bearer $ACCESS" \
   -H "Content-Type: application/json" \
-  -d '{"service_id":"<service_id>","token":"<service_token>","user_phone":"+998901234567","message":"Salom!"}'
+  -d '{"service_id":"8f2a...","token":"srv_token_...","user_phone":"+998901234567","message":"Salom!"}'
 ```
 
 ---
 
-### 6.3 Static files (logos)
+### 6.3 List services
 
-```http
+```
+GET /services/get
+```
+
+**Auth: Bearer, role `owner`**
+
+**Response `200`**: array of [`Service`](#service)
+
+```json
+[
+  {
+    "id": "8f2a1c3d-4b5e-4f6a-9d7c-1e2b3a4c5d6e",
+    "name": "jamgarma_app",
+    "title": "Jamg'arma Moliya Tashkiloti MCHJ",
+    "logo_url": "/static/0b6f2d9e-7a41-4c1d-9a55-3f0c8e1b2a77.png",
+    "about": "Onlayn jamg'arma xizmati",
+    "token": "srv_token_3f9a1c7e5b2d8f40a6c1e9b7d3f5a2c8e4b6d0f1a9c7e5b3"
+  }
+]
+```
+
+**Errors**
+
+| Status | `detail` | Cause |
+|---|---|---|
+| `403` | `Ushbu amalni bajarishda sizda yetarlicha huquq yo'q!` | Caller is not `owner` |
+| `404` | `Sizda hali Servicelar mavjud emas` | **There are no services at all.** Clients must treat this `404` as an empty list |
+| `401` | see [3.5](#35-missing-or-invalid-bearer-token) | |
+
+> **Caveats:** this returns **every** service in the system (services are not
+> linked to the owner who created them), and it returns each service's
+> secret `token` in plaintext every time. Anything that logs responses or
+> caches this endpoint is holding live credentials.
+
+```bash
+curl "$BASE/services/get" -H "Authorization: Bearer $ACCESS"
+```
+
+---
+
+### 6.4 Broadcast to all users
+
+Intended behaviour: queue a push notification to every user who has a
+device token, and return immediately.
+
+```
+POST /services/broadcast
+```
+
+**Auth: Bearer, role `owner`** (the code intends `admin` or `owner`)
+
+**Body (JSON)**
+
+| Field | Type | Required | Constraints |
+|---|---|---|---|
+| `title` | string | yes | max 150 characters |
+| `message` | string | yes | max 1000 characters |
+
+```json
+{ "title": "Texnik ishlar", "message": "Bugun 23:00 da xizmat 10 daqiqaga to'xtaydi." }
+```
+
+**Intended response `200`**
+
+```json
+{
+  "status": "success",
+  "message": "Ommaviy xabar fonda yuborish uchun navbatga qo'shildi."
+}
+```
+
+**Intended error:** `403` with
+`Ommaviy xabar yuborish uchun faqat Admin yoki Owner huquqi kerak.`, plus
+`401` and `422` as usual.
+
+> ### Caveat – currently returns `500` for every authenticated call
+> The role check is `current_user.role not in [UserRole.ADMIN, UserRole.OWNER]`,
+> but `UserRole` only defines `OWNER` and `USER`. Evaluating `UserRole.ADMIN`
+> raises `AttributeError`, so any request that gets past authentication fails
+> with `500 Internal Server Error`. Fix either way:
+> - Only owners should broadcast: use `[UserRole.OWNER]`, or
+> - add `ADMIN = "admin"` to `UserRole` **and** a migration for the enum
+>   (this also resolves the `.TODO` note about admin users).
+
+**How it works once fixed** (from `services/background.py`):
+
+- The request returns immediately; delivery happens in a background task.
+- The task selects every user whose `device_token` is non-null and non-empty
+  and sends one FCM push per device, **sequentially**.
+- Failures are only printed to the server log. There is no per-device result
+  and no response field reporting how many were sent.
+- Broadcasts are **not** saved to the `notifications` table, so they will not
+  appear in `GET /api/v1/notifications`.
+- On Vercel (serverless), work scheduled after the response may be cut off
+  when the function freezes, and the function has a 30 s `maxDuration`
+  (`vercel.json`). Large user bases may not be fully reached. For anything
+  beyond a small audience, use FCM topics or a proper queue.
+
+```bash
+curl -X POST "$BASE/services/broadcast" \
+  -H "Authorization: Bearer $ACCESS" \
+  -H "Content-Type: application/json" \
+  -d '{"title":"Texnik ishlar","message":"Bugun 23:00 da xizmat 10 daqiqaga to'\''xtaydi."}'
+```
+
+---
+
+## 7. Static files
+
+```
 GET /static/{filename}
 ```
 
-No authentication. Serves files uploaded via [Register a service](#61-register-a-service--owner).
-Because `logo_url` is stored as a **relative** path, prefix it with the Base URL:
+Public, no auth. Serves files from the upload directory, which is how
+service logos are exposed: `logo_url` values look like
+`/static/<uuid>.<ext>`, and are **relative**, so prepend the base URL:
+`https://<host>/static/0b6f2d9e-....png`.
 
-```js
-const logoSrc = `${BASE_URL}${service.logo_url}`;  // e.g. https://api.example.com/static/3f9c….png
-```
-
-| Status | Meaning |
+| Environment | Upload directory |
 |---|---|
-| `200` | File returned with its image content type |
-| `404` | File doesn't exist (also happens on Vercel after the temporary storage is cleared) |
+| Local | `./uploads` (created on startup) |
+| Vercel (`VERCEL` env var set) | the system temp dir (`/tmp`) |
+
+> **Caveat:** on Vercel `/tmp` is ephemeral and per-instance. Uploaded logos
+> disappear on cold starts and redeploys and may not be visible from other
+> instances, which leaves `logo_url` pointing at a `404`. For production,
+> store logos in object storage (e.g. Supabase Storage, which this project
+> already depends on for Postgres) and save the full public URL.
 
 ---
 
-## 7. Health checks
+## 8. Health checks
 
-No authentication required.
-
-```http
+```
 GET /
 ```
 
@@ -733,7 +713,7 @@ GET /
 { "project": "Authenticator by iDev", "status": "Working 200 OK" }
 ```
 
-```http
+```
 GET /health
 ```
 
@@ -741,74 +721,74 @@ GET /health
 { "status": "ok" }
 ```
 
+Both are public and return `200`.
+
 ---
 
-## 8. Data models
-
-### TokenResponse
-
-Returned by **register**, **login** and **refresh**.
-
-| Field | Type | Description |
-|---|---|---|
-| `status` | string | Always `"success"` |
-| `access_token` | string | JWT, send as `Bearer` token |
-| `refresh_token` | string | JWT, send only to `/users/refresh`. **Replace the stored one every time** |
-| `token_type` | string | Always `"bearer"` |
-| `user` | [`User`](#user) | The authenticated user |
+## 9. Data models
 
 ### User
 
-| Field | Type | Description |
+| Field | Type | Notes |
 |---|---|---|
 | `id` | UUID | |
 | `full_name` | string | |
-| `phone_number` | string | |
+| `phone_number` | string | Unique |
+| `role` | string | `"user"` or `"owner"` |
 
-(The `role` is intentionally/currently **not** part of this object.)
+(Stored but never returned: `hashed_password`, `device_token`,
+`refresh_token_hash`, `is_active`, `created_at`.)
+
+### Token response
+
+Returned by register, login and refresh.
+
+| Field | Type | Notes |
+|---|---|---|
+| `status` | string | Always `"success"` |
+| `access_token` | string | JWT |
+| `refresh_token` | string | JWT |
+| `token_type` | string | Always `"bearer"` |
+| `user` | [`User`](#user) | |
 
 ### Notification
 
-| Field | Type | Description |
+| Field | Type | Notes |
 |---|---|---|
 | `id` | UUID | |
 | `service_id` | UUID | The service that sent it |
 | `message` | string | |
-| `is_read` | boolean | `false` until marked as read |
-| `sent_at` | datetime (UTC) | |
+| `is_read` | boolean | Starts `false` |
+| `sent_at` | datetime | UTC |
 
-### RegisterServiceResponse
+### Service
 
-| Field | Type | Description |
+| Field | Type | Notes |
 |---|---|---|
-| `status` | string | `"success"` |
-| `service_id` | UUID string | |
-| `token` | string | Service secret, shown once |
+| `id` | UUID | |
+| `name` | string | Unique, 3–50 chars at registration |
+| `title` | string | 2–150 chars at registration |
+| `logo_url` | string \| null | Relative path, e.g. `/static/<uuid>.png` |
+| `about` | string \| null | |
+| `token` | string | `srv_token_` + 48 hex chars |
 
-### SendMessageResponse
-
-| Field | Type | Description |
-|---|---|---|
-| `status` | string | `"success"` |
-| `message` | string | `"Xabar yetkazildi"` |
-| `push_sent` | boolean | Whether FCM accepted the push |
+(Stored but never returned: `is_active`, `created_at`. There is no endpoint
+to deactivate a service.)
 
 ---
 
-## 9. Errors
+## 10. Errors
 
-### Business errors
+### 10.1 Format
 
-Errors raised by the API have this shape (`detail` is a **string**):
+Every error is FastAPI's default shape. `detail` is a string for business and
+auth errors:
 
 ```json
 { "detail": "Telefon raqam yoki parol noto'g'ri!" }
 ```
 
-### Validation errors (`422`)
-
-When the body/params don't match the schema, FastAPI returns `detail` as an
-**array** of objects — not a string. Make sure your client handles both shapes:
+For `422` it is an array, one entry per invalid field:
 
 ```json
 {
@@ -817,235 +797,211 @@ When the body/params don't match the schema, FastAPI returns `detail` as an
       "type": "missing",
       "loc": ["body", "phone_number"],
       "msg": "Field required",
-      "input": { "full_name": "A" }
+      "input": { "full_name": "Ibrohim Aliyev", "password": "S3cur3Pass!" }
     }
   ]
 }
 ```
 
-### Status codes
+> **Don't switch on `detail` text.** Most messages are in Uzbek, a few
+> (`Not authenticated`, `422` messages) are in English, and the wording may
+> change. Branch on the HTTP status, and show or log `detail` for humans.
 
-| Code | Meaning |
+### 10.2 Status codes
+
+| Code | Meaning in this API |
 |---|---|
-| `200` | Success |
-| `201` | Created (`POST /services/register`) |
-| `307` | You used a URL with a trailing slash — the server is redirecting to the slash-less URL |
-| `400` | Business-rule violation (duplicate phone number, duplicate service name, bad logo extension) |
-| `401` | Invalid credentials: wrong password, bad/missing access token, bad refresh token, or bad service credentials |
-| `403` | Authenticated, but the role is not allowed (`OWNER` required) |
-| `404` | Resource not found (unregistered phone on login, unknown notification, unknown user for a message, missing static file, unknown path) |
-| `405` | Wrong HTTP method for the path (e.g. `GET /users/logout`) — body: `{"detail":"Method Not Allowed"}` |
-| `422` | Request failed schema validation (missing/malformed field, wrong content type) |
-| `500` | Server error (e.g. misconfigured environment variables / database) |
+| `200` | Success (including register) |
+| `201` | Service created |
+| `400` | Duplicate phone number, duplicate service name, or disallowed logo type |
+| `401` | Bad/missing access token, bad refresh token, wrong password, or invalid service credentials |
+| `403` | Authenticated, but not an `owner` |
+| `404` | Unknown phone number (login), unknown recipient, notification not found, or no services exist |
+| `422` | Request failed schema validation |
+| `500` | Unhandled server error (e.g. [broadcast](#64-broadcast-to-all-users) today) |
 
-### Every error message
+### 10.3 Every `detail` string
 
-| Endpoint | Status | `detail` |
+| Status | `detail` | Endpoint(s) |
 |---|---|---|
-| `POST /users/register` | 400 | `Ushbu telefon raqam allaqachon ro'yxatdan o'tgan!` |
-| `POST /users/login` | 404 | `Bunday telefon raqam avval ro'yxatdan o'tmagan!` |
-| `POST /users/login` | 401 | `Telefon raqam yoki parol noto'g'ri!` |
-| `POST /users/refresh` | 401 | `Refresh token yaroqsiz yoki muddati o'tgan!` |
-| `POST /users/logout` | 200 | `Tizimdan muvaffaqiyatli chiqildi` *(success — not an error)* |
-| 🔒 endpoints | 401 | `Not authenticated` (no/incorrect `Authorization` header) |
-| 🔒 endpoints | 401 | `Token yaroqsiz yoki muddati o'tgan!` |
-| 👑 endpoints | 403 | `Ushbu amalni bajarish uchun sizda yetarli huquq yo'q.` |
-| `PATCH /notifications/{id}/read` | 404 | `Bildirishnoma topilmadi` |
-| `POST /services/register` | 400 | `Bunday nomli servis allaqachon ro'yxatdan o'tgan.` |
-| `POST /services/register` | 400 | `Faqat rasm fayllari (.jpg, .jpeg, .png, .webp) qabul qilinadi.` |
-| `POST /services/messages/send` | 401 | `Yaroqsiz service_id yoki token!` |
-| `POST /services/messages/send` | 404 | `Ushbu telefon raqamli foydalanuvchi topilmadi` |
+| 400 | `Ushbu telefon raqam allaqachon ro'yxatdan o'tgan!` | register |
+| 404 | `Bunday telefon raqam avval ro'yxatdan o'tmagan!` | login |
+| 401 | `Telefon raqam yoki parol noto'g'ri!` | login |
+| 401 | `Refresh token yaroqsiz yoki muddati o'tgan!` | refresh |
+| 401 | `Token yaroqsiz yoki muddati o'tgan!` | all Bearer endpoints |
+| 401 | `Not authenticated` | all Bearer endpoints (header missing) |
+| 404 | `Bildirishnoma topilmadi` | mark read |
+| 403 | `Ushbu amalni bajarish uchun sizda yetarli huquq yo'q.` | services/register, services/messages/send |
+| 403 | `Ushbu amalni bajarishda sizda yetarlicha huquq yo'q!` | services/get |
+| 403 | `Ommaviy xabar yuborish uchun faqat Admin yoki Owner huquqi kerak.` | services/broadcast (unreachable today) |
+| 400 | `Bunday nomli servis allaqachon ro'yxatdan o'tgan.` | services/register |
+| 400 | `Faqat rasm fayllari (.jpg, .jpeg, .png, .webp) qabul qilinadi.` | services/register |
+| 401 | `Yaroqsiz service_id yoki token!` | services/messages/send |
+| 404 | `Ushbu telefon raqamli foydalanuvchi topilmadi` | services/messages/send |
+| 404 | `Sizda hali Servicelar mavjud emas` | services/get |
 
 ---
 
-## 10. Troubleshooting
+## 11. Push notifications (FCM)
 
-**First step: read the HTTP status *and* the `detail` text in the response body.**
-They tell you exactly where to look.
+- Delivery uses the Firebase Admin SDK. Pushes are sent as high-priority
+  messages with the default sound; for iOS the APNs priority is `10` and
+  `content_available` is set.
+- A user receives pushes only if their `device_token` is set. Tokens are
+  saved by **register** and **login** (login only overwrites when a
+  non-empty token is sent). There is no endpoint to update the token
+  without logging in again.
+- **Re-send `device_token` on every login**, and log in again (or add an
+  endpoint) when FCM rotates the token, otherwise pushes go to a dead token.
+- Each user has **one** device token, so a second device overwrites the
+  first.
+- Invalid or expired device tokens are not cleaned up; FCM errors only
+  produce `push_sent: false` (single message) or a log line (broadcast).
+- The server needs Firebase credentials at startup. `services/fcm.py` calls
+  `firebase_admin.initialize_app()` with no arguments, which uses Google
+  Application Default Credentials (typically the `GOOGLE_APPLICATION_CREDENTIALS`
+  environment variable pointing to a service-account JSON). If they are
+  missing, the app fails to import. This variable is not in `.env.example`.
 
-### Login problems
+---
 
-| Status | `detail` | Likely cause | Fix |
-|---|---|---|---|
-| `404` | `Bunday telefon raqam avval ro'yxatdan o'tmagan!` | Number never registered, **or** sent in a different format than at register (`+` missing, spaces, trailing space, `0` prefix, …) | Normalize the phone number identically for register and login; log the exact string you send |
-| `404` | same | User was registered on a **different environment** (local DB vs. production DB) | Use the same Base URL for register and login, or register again on the target environment |
-| `401` | `Telefon raqam yoki parol noto'g'ri!` | The phone exists but the **password is wrong**, or the input field trimmed/modified it | Compare the raw value; test the same credentials in `/docs` |
-| `422` | *(array)* | Body isn't JSON (form-data / `x-www-form-urlencoded`), or you sent `username` instead of `phone_number` | Send JSON with `phone_number` + `password` |
-| `307` | – | URL has a trailing slash (`/login/`) | Remove the slash |
+## 12. Client integration guide
 
-### Token problems (🔒 endpoints)
+### 12.1 Typical flow
 
-| Status | `detail` | Likely cause | Fix |
-|---|---|---|---|
-| `401` | `Not authenticated` | No `Authorization` header, or it doesn't start with `Bearer ` | Send `Authorization: Bearer <access_token>` |
-| `401` | `Token yaroqsiz yoki muddati o'tgan!` | Sent the **refresh** token instead of the access token | Use `access_token` for API calls |
-| `401` | same | Token wrapped in quotes / contains whitespace or newline / was `JSON.stringify`-ed into storage | Store and send the raw string |
-| `401` | same | Access token expired (30 days by default) | Call `/users/refresh`, then retry |
-| `401` | same | Token was issued by a server with a different `SECRET_KEY` (e.g. local token used against production) | Log in against the same environment you call |
-| `401` | `Refresh token yaroqsiz yoki muddati o'tgan!` (`/refresh`) | Refresh token already used (rotated) — often two parallel refresh calls, or the old token was saved | Always save the newest refresh token; serialize refresh calls |
-| `401` | same | The user logged in on another device, **or logged out** (either invalidates the refresh token) | Send the user to the login screen |
+```
+ App start
+   ├─ no stored tokens ─────────────▶ Register / Login ──▶ store both tokens
+   └─ tokens stored ────▶ GET /me
+                            ├─ 200 ─▶ continue
+                            └─ 401 ─▶ POST /refresh
+                                        ├─ 200 ─▶ store NEW pair, retry
+                                        └─ 401 ─▶ clear tokens, show Login
 
-### Services problems
-
-| Status | `detail` / symptom | Likely cause | Fix |
-|---|---|---|---|
-| `404` | `Not Found` on `/api/v1/services/register` or `/api/v1/messages/send` | Using the **old v1 paths** | Use `/services/register` and `/services/messages/send` |
-| `403` | `Ushbu amalni bajarish uchun sizda yetarli huquq yo'q.` | The logged-in user isn't an `OWNER` | Use an owner account (role is set in the database); don't log the user out |
-| `401` | `Yaroqsiz service_id yoki token!` | Wrong `service_id`/`token` pair or inactive service | Re-check the values returned by `/services/register`. This is **not** an expired session |
-| `422` | `loc: ["body","name"] … Field required` on register | Request sent as JSON, but this endpoint needs `multipart/form-data` | Send `FormData` / `-F` fields |
-| `422` | Upload fails only from your own `fetch` code | You set `Content-Type` manually on a `FormData` body | **Don't** set `Content-Type` — the browser must add the multipart boundary itself |
-| `400` | `Faqat rasm fayllari …` | Logo isn't `.jpg/.jpeg/.png/.webp` | Convert the image |
-| `200` but `push_sent: false` | – | Target user has no `device_token`, or the server has no Firebase credentials / the token is invalid | Send `device_token` on register/login; check server FCM config |
-| `404` on `/static/...` | Logo missing | Vercel's `/tmp` storage was cleared (cold start / redeploy) | Use external object storage for logos |
-
-### Other
-
-| Symptom | Cause |
-|---|---|
-| `405` on logout | You called `GET /users/logout`; it must be `POST` |
-| `500` on register | Password longer than 72 bytes, or phone number longer than 20 characters (database limit) |
-| Swagger "Authorize" button fails | The Authorize dialog sends a *form* to `/login`, but this endpoint accepts JSON only. Call `/login` via "Try it out", then paste the `access_token` into the Authorize dialog |
-
-**Quick isolation test** — if this works but your app doesn't, the problem is in the client's request:
-
-```bash
-# 1. Register (once)
-curl -s -X POST "$BASE/api/v1/users/register" -H "Content-Type: application/json" \
-  -d '{"full_name":"Test","phone_number":"+998901234567","password":"S3cur3Pass!"}'
-
-# 2. Login
-curl -s -X POST "$BASE/api/v1/users/login" -H "Content-Type: application/json" \
-  -d '{"phone_number":"+998901234567","password":"S3cur3Pass!"}'
-
-# 3. Use the access token
-curl -s "$BASE/api/v1/users/me" -H "Authorization: Bearer <access_token>"
+ Normal use    : GET /notifications, PATCH /notifications/{id}/read
+ Sign out      : POST /logout, then delete both tokens locally
 ```
 
----
+Always **replace both tokens** after `/refresh`; the old refresh token no
+longer works.
 
-## 11. Frontend integration example
+### 12.2 Token handling with automatic refresh
 
-A minimal `fetch` wrapper (JavaScript) that attaches the token, refreshes it once when the
-**session** is invalid, supports `FormData` uploads, and makes sure only one refresh runs
-at a time.
+Serialise refreshes so concurrent requests don't burn the rotated token:
 
 ```js
-const BASE_URL = "https://<your-vercel-project>.vercel.app";
+const BASE = "https://<your-project>.vercel.app";
+let tokens = JSON.parse(localStorage.getItem("tokens") || "null"); // {access_token, refresh_token}
+let refreshInFlight = null;
 
-// Keep the same phone format on register AND login.
-export const normalizePhone = (raw) => "+" + raw.replace(/\D/g, "");
-
-const tokens = {
-  get access() { return localStorage.getItem("access_token"); },
-  get refresh() { return localStorage.getItem("refresh_token"); },
-  save(data) {
-    localStorage.setItem("access_token", data.access_token);
-    localStorage.setItem("refresh_token", data.refresh_token); // always overwrite!
-  },
-  clear() {
-    localStorage.removeItem("access_token");
-    localStorage.removeItem("refresh_token");
-  },
-};
-
-export async function login(phone, password) {
-  const res = await fetch(`${BASE_URL}/api/v1/users/login`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ phone_number: normalizePhone(phone), password }),
-  });
-  const data = await res.json();
-  if (!res.ok) {
-    const err = new Error(typeof data.detail === "string" ? data.detail : "Validation error");
-    err.status = res.status; // 404 = number not registered, 401 = wrong password
-    throw err;
-  }
-  tokens.save(data);
-  return data.user;
+function saveTokens(t) {
+  tokens = t;
+  localStorage.setItem("tokens", JSON.stringify(t));
 }
-
-export async function logout() {
-  try {
-    // Best effort: revokes the refresh token on the server (for ALL devices).
-    if (tokens.access) {
-      await fetch(`${BASE_URL}/api/v1/users/logout`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${tokens.access}` },
-      });
-    }
-  } catch (_) {
-    // Network error: still log out locally.
-  } finally {
-    // The access token stays valid server-side until it expires,
-    // so deleting it locally is what actually ends the session on this device.
-    tokens.clear();
-  }
-}
-
-let refreshing = null; // single in-flight refresh
 
 async function refreshTokens() {
-  refreshing ??= fetch(`${BASE_URL}/api/v1/users/refresh`, {
+  const res = await fetch(`${BASE}/api/v1/users/refresh`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ refresh_token: tokens.refresh }),
-  })
-    .then(async (res) => {
-      if (!res.ok) { tokens.clear(); throw new Error("SESSION_EXPIRED"); }
-      tokens.save(await res.json());
-    })
-    .finally(() => { refreshing = null; });
-  return refreshing;
+    body: JSON.stringify({ refresh_token: tokens.refresh_token }),
+  });
+  if (!res.ok) return false;
+  const data = await res.json();
+  saveTokens({ access_token: data.access_token, refresh_token: data.refresh_token });
+  return true;
 }
 
-// Only these 401s mean "the access token is bad". Other 401s
-// (e.g. "Yaroqsiz service_id yoki token!") must NOT trigger a refresh.
-const SESSION_401 = ["Not authenticated", "Token yaroqsiz yoki muddati o'tgan!"];
+export async function api(path, options = {}) {
+  const send = () =>
+    fetch(BASE + path, {
+      ...options,
+      headers: { ...options.headers, Authorization: `Bearer ${tokens.access_token}` },
+    });
 
-async function isSessionError(res) {
-  if (res.status !== 401) return false;
-  const body = await res.clone().json().catch(() => null);
-  return SESSION_401.includes(body?.detail);
-}
-
-export async function api(path, options = {}, retry = true) {
-  const headers = { ...options.headers, Authorization: `Bearer ${tokens.access}` };
-  // For FormData the browser must set Content-Type (with the multipart boundary) itself.
-  if (!(options.body instanceof FormData)) headers["Content-Type"] = "application/json";
-
-  const res = await fetch(`${BASE_URL}${path}`, { ...options, headers });
-
-  if (retry && tokens.refresh && (await isSessionError(res))) {
-    await refreshTokens();               // throws SESSION_EXPIRED -> go to login screen
-    return api(path, options, false);    // retry once with the new token
+  let res = await send();
+  if (res.status === 401) {
+    // one shared refresh for all requests that failed at the same time
+    refreshInFlight ??= refreshTokens().finally(() => { refreshInFlight = null; });
+    if (await refreshInFlight) res = await send();
+    else { localStorage.removeItem("tokens"); tokens = null; /* redirect to login */ }
   }
-  return res; // 403 = not allowed (don't log out), other 401s are handled by the caller
+  return res;
 }
-
-// ---- Usage -------------------------------------------------------------
-// const me   = await (await api("/api/v1/users/me")).json();
-// const list = await (await api("/api/v1/notifications")).json();
-// await api(`/api/v1/notifications/${id}/read`, { method: "PATCH" });
-// await logout();  // then navigate to the login screen
-
-// ---- OWNER-only calls --------------------------------------------------
-// Register a service (multipart, optional logo):
-// const form = new FormData();
-// form.append("name", "jamgarma_app");
-// form.append("title", "Jamg'arma Moliya Tashkiloti MCHJ");
-// form.append("about", "Onlayn jamg'arma xizmati");
-// form.append("logo", fileInput.files[0]);               // optional
-// const res = await api("/services/register", { method: "POST", body: form });
-// if (res.status === 403) { /* current user is not an OWNER */ }
-// const { service_id, token } = await res.json();        // 201 — save the token now!
-//
-// Send a message (+ push):
-// const res = await api("/services/messages/send", {
-//   method: "POST",
-//   body: JSON.stringify({ service_id, token, user_phone: normalizePhone("90 123 45 67"), message: "Salom!" }),
-// });
-// const { push_sent } = await res.json();
 ```
 
-> On mobile, store tokens in the platform's secure storage (Keychain / Keystore)
-> rather than plain `localStorage` / `SharedPreferences`.
+Use it for Bearer endpoints, not for `/login` or `/register`. For
+`POST /services/messages/send`, remember that a `401` can mean bad service
+credentials instead of an expired access token.
+
+### 12.3 Smoke test from the command line
+
+```bash
+BASE=http://127.0.0.1:8000
+
+# register (or login) and capture the tokens
+RESP=$(curl -s -X POST $BASE/api/v1/users/register -H "Content-Type: application/json" \
+  -d '{"full_name":"Test User","phone_number":"+998900000001","password":"Passw0rd!"}')
+ACCESS=$(echo "$RESP"  | python -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
+REFRESH=$(echo "$RESP" | python -c "import sys,json; print(json.load(sys.stdin)['refresh_token'])")
+
+curl -s $BASE/api/v1/users/me -H "Authorization: Bearer $ACCESS"
+curl -s -X POST $BASE/api/v1/users/refresh -H "Content-Type: application/json" \
+  -d "{\"refresh_token\":\"$REFRESH\"}"
+curl -s $BASE/api/v1/notifications -H "Authorization: Bearer $ACCESS"
+```
+
+---
+
+## 13. Known issues
+
+Ordered roughly by impact. None of these are documentation errors; they are
+properties of the current code.
+
+| # | Issue | Impact | Suggested fix |
+|---|---|---|---|
+| 1 | `POST /services/broadcast` references `UserRole.ADMIN`, which doesn't exist | Always `500` after auth | Use `[UserRole.OWNER]` or add `ADMIN` to the enum + migration |
+| 2 | Sending a message needs an **owner JWT** *and* the service token | Partner backends can't integrate with only a service token | Authenticate `messages/send` by service token alone (e.g. `X-Service-Token` header) and drop the owner requirement |
+| 3 | `GET /services/get` returns every service's plaintext `token`, to any owner | Credential exposure; no ownership scoping | Return the token only at creation, store it hashed, link services to their owner |
+| 4 | Logout doesn't revoke the access token (30-day default lifetime) | A stolen access token stays valid for weeks | Shorten `ACCESS_TOKEN_EXPIRE_DAYS` (e.g. 15–60 min) now that refresh exists |
+| 5 | Logout keeps `device_token` | Pushes continue to a logged-out device | Null `device_token` in `/logout` |
+| 6 | One refresh-token hash per user | Logging in on a new device logs out the old one | Store sessions in a separate table if multi-device is needed |
+| 7 | `User.is_active` and `Service.is_active` have no admin endpoints; `User.is_active` is never enforced | Can't disable a user; deactivating a service needs SQL | Check `is_active` in login and `get_current_user`; add toggle endpoints |
+| 8 | Login returns `404` vs `401` | Phone-number enumeration | Return one generic `401` for both cases |
+| 9 | No phone or password validation | Inconsistent phone formats create duplicate-looking accounts; weak passwords | Add `pattern`/`min_length` constraints in `RegisterSchema`, normalise numbers |
+| 10 | Logos are written to local disk / `/tmp` | Lost on Vercel cold start/redeploy | Use object storage and store the full URL |
+| 11 | Broadcast is sequential, unstored, and runs after the response | Truncated on serverless, no delivery report, no in-app history | FCM topic or queue; optionally also insert `Notification` rows |
+| 12 | Users can't resolve `service_id` to a name/logo | Notification list can't show who sent it | Add an authenticated read-only `GET /api/v1/services` |
+| 13 | `/docs` Authorize dialog posts form data but login takes JSON | Swagger "Authorize" doesn't work | Add a form-based `/token` endpoint, or accept both |
+| 14 | Mixed prefixes: `/api/v1/...` vs `/services/...` | Easy to call the wrong path | Mount the services router under `/api/v1/services` (breaking change) |
+| 15 | Migrations disagree on the `userrole` enum (initial migration creates `admin`/`user`/`moderator`; the next one adds the `role` column again as `OWNER`/`USER`) | `alembic upgrade head` on a fresh DB may fail or leave unexpected labels | Verify the DB with `enum_range(NULL::userrole)` and reconcile into one clean migration |
+
+---
+
+## 14. Configuration
+
+Read by `config.py` from environment variables (a local `.env` in
+development, Vercel project settings in production). Copy `.env.example` to
+`.env` to start.
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `DATABASE_URL` | yes | | SQLAlchemy async URL, e.g. `postgresql+asyncpg://USER:PASSWORD@HOST:6543/postgres` (Supabase pooler) |
+| `SECRET_KEY` | yes | | JWT signing key. Generate with `openssl rand -hex 32` |
+| `ALGORITHM` | no | `HS256` | JWT algorithm |
+| `ACCESS_TOKEN_EXPIRE_DAYS` | no | `30` | Access token lifetime in **days** |
+| `REFRESH_TOKEN_EXPIRE_DAYS` | no | `60` | Refresh token lifetime in **days** |
+| `CORS_ORIGINS` | no | `*` | Comma-separated origins, or `*` |
+| `DEBUG` | no | `false` | Enables SQLAlchemy SQL echo |
+| `GOOGLE_APPLICATION_CREDENTIALS` | yes, for FCM | | Path to a Firebase service-account JSON (see [11](#11-push-notifications-fcm)). Not in `.env.example` |
+| `VERCEL` | auto | | Set by Vercel; switches the upload directory to `/tmp` |
+
+Run locally:
+
+```bash
+pip install -r requirements.txt
+cp .env.example .env            # fill in real values
+alembic upgrade head            # create/update tables
+uvicorn main:app --reload
+```
+
+`GET /health` should return `{"status": "ok"}` once the app is up.

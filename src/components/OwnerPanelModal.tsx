@@ -51,6 +51,9 @@ export default function OwnerPanelModal({ visible, onClose, onServiceCreated }: 
   const [loadingServices, setLoadingServices] = useState(false);
   const [revealedTokens, setRevealedTokens] = useState<Record<string, boolean>>({});
 
+  // Service Detail Modal State
+  const [selectedServiceDetail, setSelectedServiceDetail] = useState<ServiceItem | null>(null);
+
   // Register Form State
   const [regName, setRegName] = useState('');
   const [regTitle, setRegTitle] = useState('');
@@ -80,20 +83,24 @@ export default function OwnerPanelModal({ visible, onClose, onServiceCreated }: 
     setLoadingServices(true);
     try {
       const data = await servicesService.getServices();
-      if (Array.isArray(data)) {
-        setServices(data);
-        if (data.length > 0 && !selectedServiceId) {
-          setSelectedServiceId(data[0].id);
-          setManualToken(data[0].token || '');
-        }
+      // getServices returns [] for 404 ("no services yet") — no error needed
+      const list = Array.isArray(data) ? data : [];
+      setServices(list);
+      if (list.length > 0 && !selectedServiceId) {
+        setSelectedServiceId(list[0].id);
+        setManualToken(list[0].token || '');
       }
     } catch (err: any) {
-      console.warn('Services load error:', parseApiError(err));
-      showToast({
-        type: 'error',
-        title: 'Xizmatlar Yuklanmadi',
-        message: parseApiError(err, 'Xizmatlar roʻyxatini olishda xatolik yuz berdi.'),
-      });
+      const errStatus = (err as any)?.response?.status;
+      // 403 = not owner (expected), 404 = handled in getServices (shouldn't reach here)
+      if (errStatus !== 403 && errStatus !== 404) {
+        console.warn('Services load error:', parseApiError(err));
+        showToast({
+          type: 'error',
+          title: 'Xizmatlar Yuklanmadi',
+          message: parseApiError(err, 'Xizmatlar ro\u02bbxatini olishda xatolik yuz berdi.'),
+        });
+      }
     } finally {
       setLoadingServices(false);
     }
@@ -117,6 +124,11 @@ export default function OwnerPanelModal({ visible, onClose, onServiceCreated }: 
     } catch (err) {
       // Ignored
     }
+  };
+
+  // Open service detail modal
+  const handleOpenServiceDetail = (service: ServiceItem) => {
+    setSelectedServiceDetail(service);
   };
 
   // Switch to Send Tab with preselected service
@@ -437,12 +449,14 @@ export default function OwnerPanelModal({ visible, onClose, onServiceCreated }: 
                   services.map((service) => {
                     const isRevealed = Boolean(revealedTokens[service.id]);
                     return (
-                      <View
+                      <TouchableOpacity
                         key={service.id}
                         style={[
                           styles.serviceCard,
                           { backgroundColor: colors.cardBg, borderColor: colors.cardBorder },
                         ]}
+                        onPress={() => handleOpenServiceDetail(service)}
+                        activeOpacity={0.85}
                       >
                         <View style={styles.serviceHeaderRow}>
                           {service.logo_url ? (
@@ -466,11 +480,18 @@ export default function OwnerPanelModal({ visible, onClose, onServiceCreated }: 
                           </View>
 
                           <TouchableOpacity
-                            style={[styles.actionBadgeBtn, { backgroundColor: `${colors.accent}15` }]}
-                            onPress={() => handleSelectServiceForMessage(service)}
+                            style={[styles.actionBadgeBtn, { backgroundColor: `${colors.accent}15`, marginRight: 6 }]}
+                            onPress={(e) => { e.stopPropagation?.(); handleSelectServiceForMessage(service); }}
                           >
                             <Ionicons name="chatbubble-ellipses" size={16} color={colors.accent} />
                             <Text style={[styles.actionBadgeTxt, { color: colors.accent }]}>Xabar</Text>
+                          </TouchableOpacity>
+
+                          <TouchableOpacity
+                            style={[styles.actionBadgeBtn, { backgroundColor: 'rgba(255,255,255,0.06)' }]}
+                            onPress={(e) => { e.stopPropagation?.(); handleOpenServiceDetail(service); }}
+                          >
+                            <Ionicons name="information-circle-outline" size={16} color={colors.textMuted} />
                           </TouchableOpacity>
                         </View>
 
@@ -509,7 +530,7 @@ export default function OwnerPanelModal({ visible, onClose, onServiceCreated }: 
                             <Ionicons name="share-outline" size={18} color={colors.accent} />
                           </TouchableOpacity>
                         </View>
-                      </View>
+                      </TouchableOpacity>
                     );
                   })
                 )}
@@ -842,6 +863,120 @@ export default function OwnerPanelModal({ visible, onClose, onServiceCreated }: 
           </ScrollView>
         </LinearGradient>
       </KeyboardAvoidingView>
+
+      {/* SERVICE DETAIL MODAL */}
+      <Modal
+        visible={Boolean(selectedServiceDetail)}
+        animationType="slide"
+        transparent
+        onRequestClose={() => setSelectedServiceDetail(null)}
+      >
+        <View style={styles.detailModalBackdrop}>
+          <View style={[styles.detailModalSheet, { backgroundColor: colors.cardBg, borderColor: colors.cardBorder }]}>
+            {/* Handle */}
+            <View style={[styles.detailSheetHandle, { backgroundColor: colors.cardBorder }]} />
+
+            {/* Header */}
+            <View style={styles.detailModalHeader}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', flex: 1 }}>
+                {selectedServiceDetail?.logo_url ? (
+                  <Image
+                    source={{ uri: getFullLogoUrl(selectedServiceDetail.logo_url) || undefined }}
+                    style={styles.detailModalLogo}
+                  />
+                ) : (
+                  <View style={[styles.detailModalLogoPlaceholder, { backgroundColor: `${colors.accent}20` }]}>
+                    <Ionicons name="cube" size={28} color={colors.accent} />
+                  </View>
+                )}
+                <View style={{ marginLeft: 14, flex: 1 }}>
+                  <Text style={[styles.detailModalTitle, { color: colors.textPrimary }]} numberOfLines={2}>
+                    {selectedServiceDetail?.title}
+                  </Text>
+                  <Text style={[styles.detailModalName, { color: colors.accent }]}>
+                    @{selectedServiceDetail?.name}
+                  </Text>
+                </View>
+              </View>
+              <TouchableOpacity
+                style={[styles.detailModalCloseBtn, { borderColor: colors.cardBorder }]}
+                onPress={() => setSelectedServiceDetail(null)}
+              >
+                <Ionicons name="close" size={20} color={colors.textPrimary} />
+              </TouchableOpacity>
+            </View>
+
+            <ScrollView style={{ flex: 1 }} showsVerticalScrollIndicator={false}>
+              {/* About */}
+              {selectedServiceDetail?.about ? (
+                <View style={[styles.detailInfoRow, { borderColor: colors.cardBorder }]}>
+                  <Ionicons name="information-circle-outline" size={18} color={colors.accent} style={{ marginRight: 10 }} />
+                  <View style={{ flex: 1 }}>
+                    <Text style={[styles.detailInfoLabel, { color: colors.textMuted }]}>Tavsif</Text>
+                    <Text style={[styles.detailInfoValue, { color: colors.textPrimary }]}>
+                      {selectedServiceDetail.about}
+                    </Text>
+                  </View>
+                </View>
+              ) : null}
+
+              {/* Service ID */}
+              <View style={[styles.detailInfoRow, { borderColor: colors.cardBorder }]}>
+                <Ionicons name="finger-print-outline" size={18} color={colors.accent} style={{ marginRight: 10 }} />
+                <View style={{ flex: 1 }}>
+                  <Text style={[styles.detailInfoLabel, { color: colors.textMuted }]}>Service ID (UUID)</Text>
+                  <Text style={[styles.detailInfoValue, styles.detailMonoText, { color: colors.textPrimary }]} selectable>
+                    {selectedServiceDetail?.id}
+                  </Text>
+                </View>
+              </View>
+
+              {/* Token */}
+              <View style={[styles.detailInfoRow, { borderColor: colors.cardBorder }]}>
+                <Ionicons name="key-outline" size={18} color="#eab308" style={{ marginRight: 10 }} />
+                <View style={{ flex: 1 }}>
+                  <Text style={[styles.detailInfoLabel, { color: colors.textMuted }]}>Service Token</Text>
+                  <Text
+                    style={[styles.detailInfoValue, styles.detailMonoText, { color: '#eab308' }]}
+                    selectable
+                    numberOfLines={2}
+                  >
+                    {selectedServiceDetail?.token || 'Token mavjud emas'}
+                  </Text>
+                </View>
+                <TouchableOpacity
+                  style={{ padding: 6 }}
+                  onPress={() => copyOrShareToken(selectedServiceDetail?.token, selectedServiceDetail?.title)}
+                >
+                  <Ionicons name="share-outline" size={18} color={colors.accent} />
+                </TouchableOpacity>
+              </View>
+
+              {/* Actions */}
+              <View style={styles.detailModalActions}>
+                <TouchableOpacity
+                  style={[styles.detailActionBtn, { backgroundColor: `${colors.accent}15`, borderColor: colors.accent }]}
+                  onPress={() => {
+                    setSelectedServiceDetail(null);
+                    if (selectedServiceDetail) handleSelectServiceForMessage(selectedServiceDetail);
+                  }}
+                >
+                  <Ionicons name="chatbubble-ellipses" size={18} color={colors.accent} />
+                  <Text style={[styles.detailActionTxt, { color: colors.accent }]}>Xabar Yuborish</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={[styles.detailActionBtn, { backgroundColor: 'rgba(239,68,68,0.1)', borderColor: '#ef4444' }]}
+                  onPress={() => setSelectedServiceDetail(null)}
+                >
+                  <Ionicons name="close-circle-outline" size={18} color="#ef4444" />
+                  <Text style={[styles.detailActionTxt, { color: '#ef4444' }]}>Yopish</Text>
+                </TouchableOpacity>
+              </View>
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
     </Modal>
   );
 }
@@ -1134,5 +1269,106 @@ const styles = StyleSheet.create({
     color: '#ffffff',
     fontSize: 14,
     fontWeight: '700',
+  },
+
+  // Service Detail Modal styles
+  detailModalBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    justifyContent: 'flex-end',
+  },
+  detailModalSheet: {
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    borderWidth: 1,
+    borderBottomWidth: 0,
+    maxHeight: '82%',
+    paddingBottom: 32,
+  },
+  detailSheetHandle: {
+    width: 40,
+    height: 4,
+    borderRadius: 2,
+    alignSelf: 'center',
+    marginTop: 12,
+    marginBottom: 4,
+  },
+  detailModalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+    paddingVertical: 16,
+  },
+  detailModalLogo: {
+    width: 56,
+    height: 56,
+    borderRadius: 14,
+  },
+  detailModalLogoPlaceholder: {
+    width: 56,
+    height: 56,
+    borderRadius: 14,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  detailModalTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+  },
+  detailModalName: {
+    fontSize: 13,
+    fontWeight: '600',
+    marginTop: 2,
+  },
+  detailModalCloseBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    borderWidth: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  detailInfoRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    paddingHorizontal: 20,
+    paddingVertical: 14,
+    borderBottomWidth: 1,
+  },
+  detailInfoLabel: {
+    fontSize: 11,
+    fontWeight: '600',
+    textTransform: 'uppercase',
+    letterSpacing: 0.6,
+    marginBottom: 4,
+  },
+  detailInfoValue: {
+    fontSize: 14,
+    fontWeight: '500',
+    lineHeight: 20,
+  },
+  detailMonoText: {
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    fontSize: 12,
+  },
+  detailModalActions: {
+    flexDirection: 'row',
+    paddingHorizontal: 20,
+    paddingTop: 20,
+    gap: 12,
+  },
+  detailActionBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 12,
+    borderRadius: 12,
+    borderWidth: 1,
+    gap: 8,
+  },
+  detailActionTxt: {
+    fontSize: 14,
+    fontWeight: '600',
   },
 });

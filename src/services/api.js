@@ -411,24 +411,37 @@ export const notificationService = {
 export const servicesService = {
   /**
    * Get all registered services
-   * GET /services
+   * GET /services/get (API.md §6.3)
+   * Response: array of Service { id, name, title, logo_url, about, token }
+   * NOTE: 404 = "Sizda hali Servicelar mavjud emas" — treat as empty array
    */
   getServices: async () => {
     const host = getServicesHostUrl();
     const token = await safeStorage.getItem('userToken');
-    const res = await axios.get(`${host}/services`, {
-      headers: {
-        Authorization: `Bearer ${token}`,
-      },
-      timeout: 30000,
-    });
-    return res.data;
+    try {
+      const res = await axios.get(`${host}/services/get`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+        timeout: 30000,
+      });
+      return Array.isArray(res.data) ? res.data : [];
+    } catch (err) {
+      // 404 = "Sizda hali Servicelar mavjud emas" — treat as empty list (API.md §6.3)
+      if (err.response?.status === 404) {
+        console.log('📋 [getServices] No services yet (404 treated as empty list)');
+        return [];
+      }
+      throw err;
+    }
   },
+
 
   /**
    * Register a new service (Owner only)
-   * POST /services/register
-   * multipart/form-data
+   * POST /services/register — multipart/form-data
+   * Response 201: { status, service_id, token }
+   * logo_url is NOT in the response — use GET /services/get to read it later
    * @param {{ name: string, title: string, about?: string, logo?: any }} payload
    */
   registerService: async ({ name, title, about, logo }) => {
@@ -460,6 +473,7 @@ export const servicesService = {
       },
       timeout: 35000,
     });
+
     return res.data;
   },
 
@@ -467,6 +481,10 @@ export const servicesService = {
    * Send broadcast message to all users
    * POST /services/broadcast
    * @param {{ title: string, message: string }}
+   *
+   * ⚠️ WARNING (API.md §6.4 Known issue #1): Currently returns 500 for every authenticated
+   * call because server code references UserRole.ADMIN which doesn't exist in the enum.
+   * This is a server-side bug — not a client issue.
    */
   broadcastMessage: async ({ title, message }) => {
     const host = getServicesHostUrl();
@@ -492,6 +510,9 @@ export const servicesService = {
    * Send message to a single user
    * POST /services/messages/send
    * @param {{ service_id: string, token: string, user_phone: string, message: string }}
+   * ⚠️ NOTE (API.md §6.2): a 401 here can mean invalid service credentials, NOT expired
+   * access token — do NOT auto-refresh the access token on 401 from this endpoint.
+   * Check detail text: "Yaroqsiz service_id yoki token!" = service credentials wrong.
    */
   sendMessageToUser: async ({ service_id, token: serviceToken, user_phone, message }) => {
     const host = getServicesHostUrl();
