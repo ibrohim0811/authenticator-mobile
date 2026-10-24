@@ -9,7 +9,10 @@
     "userInterfaceStyle": "automatic",
     "ios": {
       "icon": "./assets/images/logo.png",
-      "bundleIdentifier": "com.anonymous.AuthenticatorApp"
+      "bundleIdentifier": "com.devguard.authenticatorapp",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
     },
     "android": {
       "adaptiveIcon": {
@@ -19,7 +22,7 @@
         "monochromeImage": "./assets/images/logo.png"
       },
       "predictiveBackGestureEnabled": false,
-      "package": "com.anonymous.AuthenticatorApp"
+      "package": "com.devguard.authenticatorapp"
     },
     "web": {
       "output": "static",
