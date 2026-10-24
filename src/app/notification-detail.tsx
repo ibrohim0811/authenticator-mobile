@@ -1,10 +1,8 @@
 import { Ionicons } from '@expo/vector-icons';
 import { BlurView } from 'expo-blur';
-import { LinearGradient } from 'expo-linear-gradient';
 import { router, useLocalSearchParams } from 'expo-router';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
-  Animated,
   Dimensions,
   Image,
   Platform,
@@ -17,7 +15,7 @@ import {
   View,
 } from 'react-native';
 import { useTheme } from '../context/ThemeContext';
-import { getFullLogoUrl } from '../services/api';
+import { getFullLogoUrl, servicesService } from '../services/api';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
@@ -51,7 +49,7 @@ function formatDate(iso?: string) {
 }
 
 export default function NotificationDetailScreen() {
-  const { theme, colors } = useTheme();
+  const { theme } = useTheme();
   const isDark = theme === 'dark';
   const params = useLocalSearchParams<{
     id: string;
@@ -67,13 +65,53 @@ export default function NotificationDetailScreen() {
 
   const [showServiceInfo, setShowServiceInfo] = useState(false);
 
+  // 🟢 Rasm yuklashda 404 yoki boshqa xato bo'lsa bosh harfga o'tkazish uchun state
+  const [imageError, setImageError] = useState(false);
+
+  // Service info state
+  const [serviceInfo, setServiceInfo] = useState<{
+    logo_url?: string;
+    service_name?: string;
+    service_title?: string;
+    about?: string;
+  }>({
+    logo_url: params.logo_url || undefined,
+    service_name: params.service_name || undefined,
+    service_title: params.service_title || undefined,
+    about: params.about || undefined,
+  });
+
+  useEffect(() => {
+    setImageError(false);
+  }, [params.logo_url]);
+
+  useEffect(() => {
+    const hasLogo = params.logo_url && params.logo_url.length > 0;
+    const hasTitle = params.service_title && params.service_title.length > 0;
+    const serviceId = params.service_id;
+
+    if (serviceId && (!hasLogo || !hasTitle)) {
+      servicesService.getServices().then((services) => {
+        const found = services.find((s: any) => s.id === serviceId);
+        if (found) {
+          setServiceInfo((prev) => ({
+            logo_url: prev.logo_url || found.logo_url || undefined,
+            service_name: prev.service_name || found.name || undefined,
+            service_title: prev.service_title || found.title || undefined,
+            about: prev.about || found.about || undefined,
+          }));
+        }
+      }).catch(() => { });
+    }
+  }, [params.service_id, params.logo_url, params.service_title]);
+
   const notif: Notif = {
     id: params.id,
     service_id: params.service_id,
-    service_name: params.service_name,
-    service_title: params.service_title,
-    logo_url: params.logo_url,
-    about: params.about,
+    service_name: serviceInfo.service_name || params.service_name,
+    service_title: serviceInfo.service_title || params.service_title,
+    logo_url: serviceInfo.logo_url || params.logo_url,
+    about: serviceInfo.about || params.about,
     message: params.message,
     sent_at: params.sent_at,
     created_at: params.created_at,
@@ -81,9 +119,9 @@ export default function NotificationDetailScreen() {
 
   const logoUri = notif.logo_url ? getFullLogoUrl(notif.logo_url) : null;
   const displayTitle = notif.service_title || notif.service_name || 'Xizmat';
+  const initialLetter = displayTitle.charAt(0).toUpperCase();
   const timeStr = formatDate(notif.sent_at || notif.created_at);
 
-  // Safe back navigation
   const handleBack = () => {
     if (router.canGoBack()) {
       router.back();
@@ -114,7 +152,6 @@ export default function NotificationDetailScreen() {
       <View style={styles.fullscreenContainer}>
         <StatusBar barStyle="light-content" translucent backgroundColor="transparent" />
 
-        {/* Blurred background (60%) */}
         <View style={styles.blurLayer}>
           <BlurView
             intensity={60}
@@ -125,7 +162,6 @@ export default function NotificationDetailScreen() {
         </View>
 
         <SafeAreaView style={styles.fullscreenSafeArea}>
-          {/* Close button */}
           <View style={styles.serviceInfoHeader}>
             <TouchableOpacity
               style={[styles.closeBtn, { backgroundColor: isDark ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.06)' }]}
@@ -141,22 +177,22 @@ export default function NotificationDetailScreen() {
             contentContainerStyle={styles.serviceInfoScrollContent}
             showsVerticalScrollIndicator={false}
           >
-            {/* ── Large circular logo ── */}
+            {/* ── Large circular logo / initial ── */}
             <View style={styles.serviceLogoSection}>
-              {logoUri ? (
+              {logoUri && !imageError ? (
                 <Image
                   source={{ uri: logoUri }}
                   style={styles.serviceLargeLogo}
+                  onError={() => setImageError(true)}
                 />
               ) : (
-                <View style={[styles.serviceLargeLogoFallback, { backgroundColor: ios.blue + '25' }]}>
+                <View style={[styles.serviceLargeLogoFallback, { backgroundColor: ios.blue + '30' }]}>
                   <Text style={[styles.serviceLargeInitial, { color: ios.blue }]}>
-                    {displayTitle.charAt(0).toUpperCase()}
+                    {initialLetter}
                   </Text>
                 </View>
               )}
 
-              {/* Service name under logo */}
               <Text style={[styles.serviceDisplayTitle, { color: '#FFFFFF' }]}>
                 {displayTitle}
               </Text>
@@ -168,9 +204,8 @@ export default function NotificationDetailScreen() {
               ) : null}
             </View>
 
-            {/* ── Info cards (iOS Settings grouped style) ── */}
+            {/* ── Info cards ── */}
             <View style={[styles.infoGroupCard, { backgroundColor: isDark ? 'rgba(255,255,255,0.08)' : 'rgba(255,255,255,0.85)' }]}>
-              {/* Name */}
               {notif.service_name ? (
                 <View style={[styles.infoCardRow, { borderBottomColor: isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.08)' }]}>
                   <View style={[styles.infoCardIcon, { backgroundColor: '#34C759' }]}>
@@ -183,7 +218,6 @@ export default function NotificationDetailScreen() {
                 </View>
               ) : null}
 
-              {/* Title */}
               {notif.service_title ? (
                 <View style={[styles.infoCardRow, { borderBottomColor: isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.08)' }]}>
                   <View style={[styles.infoCardIcon, { backgroundColor: '#007AFF' }]}>
@@ -196,7 +230,6 @@ export default function NotificationDetailScreen() {
                 </View>
               ) : null}
 
-              {/* About */}
               {notif.about ? (
                 <View style={[styles.infoCardRow, { borderBottomWidth: 0 }]}>
                   <View style={[styles.infoCardIcon, { backgroundColor: '#FF9500' }]}>
@@ -208,26 +241,8 @@ export default function NotificationDetailScreen() {
                   </View>
                 </View>
               ) : null}
-
-              {/* Logo preview row */}
-              {logoUri ? (
-                <View style={[styles.infoCardRow, { borderBottomWidth: 0 }]}>
-                  <View style={[styles.infoCardIcon, { backgroundColor: '#AF52DE' }]}>
-                    <Ionicons name="image-outline" size={16} color="#FFFFFF" />
-                  </View>
-                  <View style={styles.infoCardContent}>
-                    <Text style={[styles.infoCardLabel, { color: isDark ? 'rgba(255,255,255,0.45)' : 'rgba(0,0,0,0.45)' }]}>Logo</Text>
-                    <Image
-                      source={{ uri: logoUri }}
-                      style={styles.infoCardLogoPreview}
-                      resizeMode="cover"
-                    />
-                  </View>
-                </View>
-              ) : null}
             </View>
 
-            {/* Service ID */}
             {notif.service_id ? (
               <View style={[styles.infoGroupCard, { backgroundColor: isDark ? 'rgba(255,255,255,0.08)' : 'rgba(255,255,255,0.85)' }]}>
                 <View style={[styles.infoCardRow, { borderBottomWidth: 0 }]}>
@@ -243,7 +258,6 @@ export default function NotificationDetailScreen() {
             ) : null}
           </ScrollView>
 
-          {/* Bottom close button */}
           <View style={styles.serviceInfoFooter}>
             <TouchableOpacity
               style={[styles.fullCloseBtn, { backgroundColor: ios.blue }]}
@@ -266,9 +280,8 @@ export default function NotificationDetailScreen() {
       <StatusBar barStyle={isDark ? 'light-content' : 'dark-content'} translucent backgroundColor="transparent" />
       <SafeAreaView style={styles.safeArea}>
 
-        {/* ─── iOS-style NAVBAR ─── */}
+        {/* ─── NAVBAR ─── */}
         <View style={[styles.navbar, { borderBottomColor: ios.separator }]}>
-          {/* Back button */}
           <TouchableOpacity
             style={styles.navBackBtn}
             onPress={handleBack}
@@ -277,18 +290,21 @@ export default function NotificationDetailScreen() {
             <Ionicons name="chevron-back" size={28} color={ios.blue} />
           </TouchableOpacity>
 
-          {/* Centre — tappable: circle logo + title */}
           <TouchableOpacity
             style={styles.navCenter}
             onPress={() => setShowServiceInfo(true)}
             activeOpacity={0.7}
           >
-            {logoUri ? (
-              <Image source={{ uri: logoUri }} style={styles.navLogo} />
+            {logoUri && !imageError ? (
+              <Image
+                source={{ uri: logoUri }}
+                style={styles.navLogo}
+                onError={() => setImageError(true)}
+              />
             ) : (
               <View style={[styles.navLogoFallback, { backgroundColor: ios.blue + '20' }]}>
                 <Text style={[styles.navLogoInitial, { color: ios.blue }]}>
-                  {displayTitle.charAt(0).toUpperCase()}
+                  {initialLetter}
                 </Text>
               </View>
             )}
@@ -299,32 +315,33 @@ export default function NotificationDetailScreen() {
             </View>
           </TouchableOpacity>
 
-          {/* Right spacer */}
           <View style={{ width: 34 }} />
         </View>
 
-        {/* ─── MESSAGE BODY (iOS iMessage style) ─── */}
+        {/* ─── MESSAGE BODY ─── */}
         <ScrollView
           style={styles.scroll}
           contentContainerStyle={styles.scrollContent}
           showsVerticalScrollIndicator={false}
         >
-          {/* Time stamp */}
           {timeStr ? (
             <View style={styles.timeCenter}>
               <Text style={[styles.timeCenterText, { color: ios.secondaryLabel }]}>{timeStr}</Text>
             </View>
           ) : null}
 
-          {/* Message bubble (incoming — left aligned, gray) */}
+          {/* Message bubble */}
           <View style={styles.bubbleRow}>
-            {/* Small service avatar */}
-            {logoUri ? (
-              <Image source={{ uri: logoUri }} style={styles.bubbleAvatar} />
+            {logoUri && !imageError ? (
+              <Image
+                source={{ uri: logoUri }}
+                style={styles.bubbleAvatar}
+                onError={() => setImageError(true)}
+              />
             ) : (
               <View style={[styles.bubbleAvatarFallback, { backgroundColor: ios.blue + '20' }]}>
                 <Text style={[styles.bubbleAvatarInitial, { color: ios.blue }]}>
-                  {displayTitle.charAt(0).toUpperCase()}
+                  {initialLetter}
                 </Text>
               </View>
             )}
@@ -342,11 +359,17 @@ export default function NotificationDetailScreen() {
             onPress={() => setShowServiceInfo(true)}
             activeOpacity={0.7}
           >
-            {logoUri ? (
-              <Image source={{ uri: logoUri }} style={styles.serviceInfoCardLogo} />
+            {logoUri && !imageError ? (
+              <Image
+                source={{ uri: logoUri }}
+                style={styles.serviceInfoCardLogo}
+                onError={() => setImageError(true)}
+              />
             ) : (
               <View style={[styles.serviceInfoCardFallback, { backgroundColor: ios.blue + '20' }]}>
-                <Ionicons name="shield-checkmark" size={20} color={ios.blue} />
+                <Text style={{ color: ios.blue, fontSize: 18, fontWeight: '600' }}>
+                  {initialLetter}
+                </Text>
               </View>
             )}
             <View style={{ flex: 1, marginLeft: 12 }}>
@@ -366,9 +389,6 @@ export default function NotificationDetailScreen() {
   );
 }
 
-/* ══════════════════════════════════════════════ */
-/*                    STYLES                     */
-/* ══════════════════════════════════════════════ */
 const styles = StyleSheet.create({
   container: { flex: 1 },
   safeArea: {
@@ -495,9 +515,7 @@ const styles = StyleSheet.create({
     marginTop: 2,
   },
 
-  /* ══════════════════════════════════════════ */
-  /*       FULLSCREEN SERVICE INFO STYLES      */
-  /* ══════════════════════════════════════════ */
+  /* ── Fullscreen Service Info ── */
   fullscreenContainer: {
     flex: 1,
     backgroundColor: '#000000',
@@ -535,7 +553,6 @@ const styles = StyleSheet.create({
     paddingBottom: 30,
   },
 
-  /* ── Logo Section ── */
   serviceLogoSection: {
     alignItems: 'center',
     marginTop: 20,
@@ -575,7 +592,6 @@ const styles = StyleSheet.create({
     fontWeight: '400',
   },
 
-  /* ── Info Group Cards ── */
   infoGroupCard: {
     borderRadius: 14,
     marginBottom: 16,
@@ -609,14 +625,7 @@ const styles = StyleSheet.create({
     fontWeight: '500',
     lineHeight: 22,
   },
-  infoCardLogoPreview: {
-    width: 56,
-    height: 56,
-    borderRadius: 12,
-    marginTop: 6,
-  },
 
-  /* ── Footer ── */
   serviceInfoFooter: {
     paddingHorizontal: 20,
     paddingBottom: Platform.OS === 'ios' ? 10 : 16,

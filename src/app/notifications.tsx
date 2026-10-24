@@ -1,30 +1,30 @@
-import React, { useEffect, useState, useCallback, useRef } from 'react';
+import { Ionicons } from '@expo/vector-icons';
+import { router } from 'expo-router';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  View,
-  Text,
-  FlatList,
-  StyleSheet,
-  TouchableOpacity,
-  RefreshControl,
   ActivityIndicator,
   Alert,
-  SafeAreaView,
-  Platform,
   Animated,
   Dimensions,
+  FlatList,
   Image,
-  TextInput,
-  StatusBar,
   Modal,
+  Platform,
+  RefreshControl,
+  SafeAreaView,
   ScrollView,
+  StatusBar,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View,
 } from 'react-native';
-import { router } from 'expo-router';
-import { Ionicons } from '@expo/vector-icons';
-import { notificationService, authService, servicesService, parseApiError, getFullLogoUrl } from '../services/api';
+import OwnerPanelModal from '../components/OwnerPanelModal';
 import { useTheme } from '../context/ThemeContext';
 import { useToast } from '../context/ToastContext';
+import { authService, getFullLogoUrl, notificationService, parseApiError, servicesService } from '../services/api';
 import { requestPushPermissions, sendLocalPushNotification } from '../services/pushNotifications';
-import OwnerPanelModal from '../components/OwnerPanelModal';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
@@ -52,6 +52,53 @@ interface ConversationGroup {
   unreadCount: number;
   totalCount: number;
   notifications: NotificationItem[];
+}
+
+/* ── Logo yuklanmasa (404 va h.k.) bosh harfli avatar ko'rsatadi ── */
+function ServiceAvatar({
+  uri,
+  title,
+  size,
+  color,
+}: {
+  uri?: string | null;
+  title: string;
+  size: number;
+  color: string;
+}) {
+  const [failed, setFailed] = useState(false);
+
+  // URL o'zgarsa, qaytadan urinib ko'ramiz
+  useEffect(() => {
+    setFailed(false);
+  }, [uri]);
+
+  if (uri && !failed) {
+    return (
+      <Image
+        source={{ uri }}
+        style={{ width: size, height: size, borderRadius: size / 2 }}
+        onError={() => setFailed(true)}
+      />
+    );
+  }
+
+  return (
+    <View
+      style={{
+        width: size,
+        height: size,
+        borderRadius: size / 2,
+        backgroundColor: color + '20',
+        justifyContent: 'center',
+        alignItems: 'center',
+      }}
+    >
+      <Text style={{ fontSize: size * 0.43, fontWeight: '600', color }}>
+        {(title || 'S').charAt(0).toUpperCase()}
+      </Text>
+    </View>
+  );
 }
 
 export default function NotificationsScreen() {
@@ -101,7 +148,7 @@ export default function NotificationsScreen() {
     }
   };
 
-  const fetchServiceCache = async () => {
+  const fetchServiceCache = async (): Promise<Record<string, { name: string; title: string; logo_url?: string; about?: string }>> => {
     try {
       const services = await servicesService.getServices();
       const cache: Record<string, { name: string; title: string; logo_url?: string; about?: string }> = {};
@@ -111,12 +158,15 @@ export default function NotificationsScreen() {
         }
       });
       setServiceCache(cache);
+      return cache;
     } catch {
       // non-owner users get 403 — fine
+      return {};
     }
   };
 
-  const fetchNotifications = useCallback(async (isInitial = false) => {
+  const fetchNotifications = useCallback(async (isInitial = false, cacheOverride?: Record<string, { name: string; title: string; logo_url?: string; about?: string }>) => {
+    const effectiveCache = cacheOverride ?? serviceCache;
     try {
       const data = await notificationService.getNotifications();
       let rawItems: NotificationItem[] = [];
@@ -129,7 +179,7 @@ export default function NotificationsScreen() {
 
       // Merge service cache info
       rawItems = rawItems.map((item) => {
-        const cached = item.service_id ? serviceCache[item.service_id] : undefined;
+        const cached = item.service_id ? effectiveCache[item.service_id] : undefined;
         return {
           ...item,
           service_name: item.service_name || cached?.name,
@@ -175,17 +225,22 @@ export default function NotificationsScreen() {
   }, [showToast, serviceCache]);
 
   useEffect(() => {
-    requestPushPermissions();
-    fetchUser();
-    fetchServiceCache();
-    fetchNotifications(true);
-  }, [fetchNotifications]); // eslint-disable-line react-hooks/exhaustive-deps
+    const init = async () => {
+      requestPushPermissions();
+      fetchUser();
+      // Service cache AVVAL to'ldiriladi, keyin notificationlar olinadi
+      const cache = await fetchServiceCache();
+      fetchNotifications(true, cache);
+    };
+    init();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const onRefresh = () => {
+  const onRefresh = async () => {
     setRefreshing(true);
     fetchUser();
-    fetchServiceCache();
-    fetchNotifications(false);
+    // Refresh da ham avval cache, keyin notificationlar
+    const cache = await fetchServiceCache();
+    fetchNotifications(false, cache);
   };
 
   const handleMarkAsRead = async (id: string) => {
@@ -385,15 +440,12 @@ export default function NotificationsScreen() {
           onPress={() => handleShowServiceInfo(conv)}
           activeOpacity={0.7}
         >
-          {logoUri ? (
-            <Image source={{ uri: logoUri }} style={styles.avatar} />
-          ) : (
-            <View style={[styles.avatarFallback, { backgroundColor: iosColors.blue + '20' }]}>
-              <Text style={[styles.avatarInitial, { color: iosColors.blue }]}>
-                {conv.serviceTitle.charAt(0).toUpperCase()}
-              </Text>
-            </View>
-          )}
+          <ServiceAvatar
+            uri={logoUri}
+            title={conv.serviceTitle}
+            size={56}
+            color={iosColors.blue}
+          />
         </TouchableOpacity>
 
         {/* Content */}
@@ -612,18 +664,12 @@ export default function NotificationsScreen() {
               <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 30 }}>
                 {/* Logo */}
                 <View style={styles.modalLogoWrap}>
-                  {selectedService?.logoUrl ? (
-                    <Image
-                      source={{ uri: getFullLogoUrl(selectedService.logoUrl) || undefined }}
-                      style={styles.modalLogo}
-                    />
-                  ) : (
-                    <View style={[styles.modalLogoFallback, { backgroundColor: iosColors.blue + '20' }]}>
-                      <Text style={[styles.modalLogoInitial, { color: iosColors.blue }]}>
-                        {selectedService?.serviceTitle.charAt(0).toUpperCase() || 'S'}
-                      </Text>
-                    </View>
-                  )}
+                  <ServiceAvatar
+                    uri={selectedService?.logoUrl ? getFullLogoUrl(selectedService.logoUrl) : null}
+                    title={selectedService?.serviceTitle || 'Xizmat'}
+                    size={80}
+                    color={iosColors.blue}
+                  />
                 </View>
 
                 {/* Title */}
@@ -820,22 +866,6 @@ const styles = StyleSheet.create({
     paddingLeft: 16,
     paddingVertical: 10,
   },
-  avatar: {
-    width: 56,
-    height: 56,
-    borderRadius: 28,
-  },
-  avatarFallback: {
-    width: 56,
-    height: 56,
-    borderRadius: 28,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  avatarInitial: {
-    fontSize: 24,
-    fontWeight: '600',
-  },
   conversationContent: {
     flex: 1,
     marginLeft: 12,
@@ -959,22 +989,6 @@ const styles = StyleSheet.create({
   modalLogoWrap: {
     alignItems: 'center',
     marginBottom: 12,
-  },
-  modalLogo: {
-    width: 80,
-    height: 80,
-    borderRadius: 40,
-  },
-  modalLogoFallback: {
-    width: 80,
-    height: 80,
-    borderRadius: 40,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  modalLogoInitial: {
-    fontSize: 36,
-    fontWeight: '600',
   },
   modalTitle: {
     fontSize: 22,

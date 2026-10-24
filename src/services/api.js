@@ -382,7 +382,25 @@ export const authService = {
   isAuthenticated: async () => {
     const token = await safeStorage.getItem('userToken');
     return Boolean(token);
-  }
+  },
+
+  /**
+   * Update FCM device token
+   * PATCH /api/v1/users/device-token (yangi endpoint)
+   * Auth: Bearer token (user)
+   * FCM token o'zgarganda (onNewToken) ilova shuni chaqiradi.
+   * @param {string} deviceToken - Kamida 10 belgi
+   */
+  updateDeviceToken: async (deviceToken) => {
+    const res = await api.patch('/users/device-token', {
+      device_token: deviceToken,
+    });
+    if (res.data) {
+      await safeStorage.setItem('device_token', deviceToken);
+      console.log('✅ [Device Token Updated]: Server ga yangi FCM token yuborildi');
+    }
+    return res.data;
+  },
 };
 
 export const notificationService = {
@@ -501,20 +519,19 @@ export const servicesService = {
 
   /**
    * Delete a service by its token
-   * POST /services/delete?service_token=<serviceToken>
-   * Auth: owner (any service) or admin (own services only)
+   * DELETE /services/delete?service_token=<serviceToken>
+   * Auth: admin (any service) or owner (own services)
    * @param {string} serviceToken - The srv_token_... of the service to delete
-   * Response 200: { message: "Service muvaffaqiyatli o'chirildi !", status: 204 }
+   * Response 200: { message: "Service muvaffaqiyatli o'chirildi !", status: 200 }
    * Errors:
-   *   403 — caller is plain `user`, or admin trying to delete someone else's service
-   *   404 — unknown service_token
+   *   403 — Huquq yetarli emas yoki servis sizniki emas
+   *   404 — Bunday tokenli servis yo'q
    */
   deleteService: async (serviceToken) => {
     const host = getServicesHostUrl();
     const token = await safeStorage.getItem('userToken');
-    const res = await axios.post(
+    const res = await axios.delete(
       `${host}/services/delete?service_token=${encodeURIComponent(serviceToken)}`,
-      {},
       {
         headers: {
           Authorization: `Bearer ${token}`,
@@ -555,6 +572,22 @@ export const servicesService = {
     );
     return res.data;
   },
+};
+
+/**
+ * Health check — server ishlayotganini tekshirish
+ * GET /health (autentifikatsiyasiz)
+ * Response 200: { status: 'ok' }
+ */
+export const healthCheck = async () => {
+  const host = getServicesHostUrl();
+  try {
+    const res = await axios.get(`${host}/health`, { timeout: 10000 });
+    return res.data;
+  } catch (err) {
+    console.warn('⚠️ [Health Check Failed]:', err?.message);
+    return null;
+  }
 };
 
 export default api;

@@ -129,3 +129,42 @@ export async function getDevicePushToken() {
 }
 
 export const getDeviceToken = getDevicePushToken;
+
+/**
+ * Listen for FCM token refreshes and update the server via PATCH /api/v1/users/device-token
+ * Bu listener ilova ochiq bo'lganda FCM token o'zgarsa, avtomatik serverga xabar beradi.
+ * Returns an unsubscribe function, or null if not applicable.
+ */
+export function setupTokenRefreshListener() {
+  if (isExpoGo || Platform.OS === 'web' || !Notifications) {
+    return null;
+  }
+
+  try {
+    // Notifications.addPushTokenListener fires when the device push token changes
+    const subscription = Notifications.addPushTokenListener(async (tokenData) => {
+      if (tokenData?.data) {
+        console.log('🔄 [FCM Token Refreshed]:', tokenData.data.substring(0, 20) + '...');
+        await safeStorage.setItem('device_token', tokenData.data);
+
+        // Dynamically import to avoid circular dependency
+        try {
+          const { authService } = require('./api');
+          const userToken = await safeStorage.getItem('userToken');
+          if (userToken) {
+            await authService.updateDeviceToken(tokenData.data);
+            console.log('✅ [FCM Token Synced]: Server ga yangi token yuborildi');
+          }
+        } catch (syncErr) {
+          console.warn('⚠️ [FCM Token Sync Error]:', syncErr?.message || syncErr);
+        }
+      }
+    });
+
+    console.log('📡 [Push Token Listener] FCM token refresh listener o\'rnatildi');
+    return () => subscription?.remove?.();
+  } catch (err) {
+    console.warn('⚠️ [Push Token Listener Error]:', err?.message || err);
+    return null;
+  }
+}

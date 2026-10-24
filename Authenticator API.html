@@ -1,0 +1,323 @@
+<!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}html{scroll-padding-top:env(safe-area-inset-top,0px)}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#fff;color:#000}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style></head><body>
+<title>Authenticator API</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@600;700;800&family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: chap tomonda yopishqoq navigatsiya, o'ngda endpointlar ketma-ket; telefonda navigatsiya yuqoriga ko'chadi */
+:root{
+  --bg:#f6f7f9; --surface:#ffffff; --surface2:#eef0f4; --line:#dde1e8;
+  --fg:#161b26; --muted:#5a6475; --accent:#0b7a6f; --accent-soft:#dff3f0;
+  --code-bg:#0f1520; --code-fg:#d6deeb; --code-key:#7fdbca; --code-str:#ecc48d; --code-num:#f78c6c; --code-mute:#7a879b;
+  --get:#1d6fd8; --post:#12804f; --patch:#b26a00; --delete:#c2362f;
+  --get-bg:#e3eefc; --post-bg:#dcf3e8; --patch-bg:#fbeccf; --delete-bg:#fbe1df;
+  --f-display:'Bricolage Grotesque',system-ui,sans-serif; --f-body:'IBM Plex Sans',system-ui,sans-serif; --f-mono:'JetBrains Mono',ui-monospace,Menlo,monospace;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --bg:#0c1118; --surface:#131a24; --surface2:#1a2330; --line:#263142;
+  --fg:#e6eaf1; --muted:#98a3b5; --accent:#3fd0bd; --accent-soft:#12302d;
+  --code-bg:#080c12; --get:#6fb1ff; --post:#5fd59b; --patch:#f0b45a; --delete:#ff8a82;
+  --get-bg:#14283f; --post-bg:#12301f; --patch-bg:#352711; --delete-bg:#3a1917; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#0c1118; --surface:#131a24; --surface2:#1a2330; --line:#263142;
+  --fg:#e6eaf1; --muted:#98a3b5; --accent:#3fd0bd; --accent-soft:#12302d;
+  --code-bg:#080c12; --get:#6fb1ff; --post:#5fd59b; --patch:#f0b45a; --delete:#ff8a82;
+  --get-bg:#14283f; --post-bg:#12301f; --patch-bg:#352711; --delete-bg:#3a1917; color-scheme:dark}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--fg);font:15px/1.6 var(--f-body);padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));padding-block:0}
+a{color:var(--accent)}
+code,pre{font-family:var(--f-mono)}
+.wrap{max-width:1180px;margin:0 auto;display:grid;grid-template-columns:230px minmax(0,1fr);gap:40px;align-items:start}
+nav{position:sticky;top:env(safe-area-inset-top,0px);max-height:100vh;overflow:auto;padding:28px 0}
+nav .brand{font:800 20px/1.1 var(--f-display);letter-spacing:-.01em;margin-bottom:4px}
+nav .ver{font:12px var(--f-mono);color:var(--muted);margin-bottom:22px}
+nav h6{margin:18px 0 6px;font:600 11px var(--f-body);text-transform:uppercase;letter-spacing:.09em;color:var(--muted)}
+nav a{display:flex;gap:8px;align-items:center;padding:4px 8px;margin:0 -8px;border-radius:6px;color:var(--fg);text-decoration:none;font-size:13.5px}
+nav a:hover{background:var(--surface2)}
+nav a.on{background:var(--accent-soft);color:var(--accent)}
+nav .m{font:500 9.5px var(--f-mono);min-width:38px}
+.m.GET{color:var(--get)}.m.POST{color:var(--post)}.m.PATCH{color:var(--patch)}.m.DELETE{color:var(--delete)}
+nav .theme{margin-top:22px;font:12px var(--f-body);background:none;border:1px solid var(--line);color:var(--muted);border-radius:6px;padding:5px 10px;cursor:pointer}
+main{min-width:0;padding:28px 0 80px}
+h1{font:800 clamp(30px,5vw,46px)/1.05 var(--f-display);letter-spacing:-.02em;margin:0 0 12px;text-wrap:balance}
+h2{font:700 26px/1.15 var(--f-display);letter-spacing:-.01em;margin:56px 0 6px;text-wrap:balance}
+h3{font:600 13px var(--f-body);text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:22px 0 8px}
+p{margin:8px 0;max-width:68ch}
+.lead{font-size:17px;color:var(--muted);max-width:60ch}
+.base{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:22px 0 4px;padding:12px 14px;background:var(--surface);border:1px solid var(--line);border-radius:10px}
+.base label{font:600 12px var(--f-body);text-transform:uppercase;letter-spacing:.08em;color:var(--muted)}
+.base input{flex:1;min-width:200px;font:14px var(--f-mono);padding:7px 10px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg)}
+.base input:focus-visible,button:focus-visible,a:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.grid3{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin:14px 0}
+.cred{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
+.cred b{display:block;font:700 15px var(--f-display);margin-bottom:2px}
+.cred span{font-size:13.5px;color:var(--muted)}
+.flow{display:grid;gap:0;margin:14px 0;border:1px solid var(--line);border-radius:10px;background:var(--surface);overflow:hidden}
+.flow div{display:grid;grid-template-columns:150px 1fr;gap:14px;padding:11px 16px;border-top:1px solid var(--line);font-size:14px}
+.flow div:first-child{border-top:0}
+.flow b{font:600 13px var(--f-mono);color:var(--accent)}
+.ep{margin-top:26px;background:var(--surface);border:1px solid var(--line);border-radius:12px;overflow:hidden;scroll-margin-top:16px}
+.ep>header{padding:16px 18px;border-bottom:1px solid var(--line)}
+.ep h4{font:700 19px/1.2 var(--f-display);margin:0 0 8px;display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.line{display:flex;flex-wrap:wrap;align-items:center;gap:10px}
+.badge{font:600 12px var(--f-mono);padding:3px 8px;border-radius:5px}
+.badge.GET{background:var(--get-bg);color:var(--get)}.badge.POST{background:var(--post-bg);color:var(--post)}.badge.PATCH{background:var(--patch-bg);color:var(--patch)}.badge.DELETE{background:var(--delete-bg);color:var(--delete)}
+.path{font:500 14px var(--f-mono);overflow-wrap:anywhere}
+.pill{font:600 11px var(--f-body);padding:2px 8px;border-radius:99px;border:1px solid var(--line);color:var(--muted)}
+.pill.lock{border-color:var(--accent);color:var(--accent);background:var(--accent-soft)}
+.pill.new{background:var(--accent);color:var(--bg);border-color:var(--accent)}
+.ep .body{padding:4px 18px 18px}
+.cols{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:22px}
+.tbl{overflow-x:auto;border:1px solid var(--line);border-radius:8px}
+table{border-collapse:collapse;width:100%;font-size:13.5px}
+th{font:600 11px var(--f-body);text-transform:uppercase;letter-spacing:.07em;color:var(--muted);text-align:left;background:var(--surface2)}
+th,td{padding:7px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+tr:last-child td{border-bottom:0}
+td code,p code,li code,.flow code,.cred code{font-size:12.5px;background:var(--surface2);padding:1px 5px;border-radius:4px}
+td.n{font-family:var(--f-mono);font-size:12.5px;white-space:nowrap}
+.req{color:var(--delete);font-weight:600}.opt{color:var(--muted)}
+.codebox{position:relative;margin:6px 0}
+.codebox pre{margin:0;background:var(--code-bg);color:var(--code-fg);border-radius:8px;padding:14px 16px;font-size:12.5px;line-height:1.6;overflow-x:auto}
+.codebox .tag{position:absolute;top:8px;right:64px;font:500 11px var(--f-mono);color:var(--code-mute)}
+.codebox button{position:absolute;top:6px;right:8px;font:500 11.5px var(--f-body);background:#ffffff14;color:var(--code-fg);border:1px solid #ffffff22;border-radius:5px;padding:3px 9px;cursor:pointer}
+.k{color:var(--code-key)}.s{color:var(--code-str)}.nu{color:var(--code-num)}.c{color:var(--code-mute)}
+.rc{display:inline-block;font:600 12px var(--f-mono);padding:1px 7px;border-radius:5px;margin-right:6px}
+.rc.ok{background:var(--post-bg);color:var(--post)}.rc.er{background:var(--delete-bg);color:var(--delete)}
+.note{border-left:3px solid var(--patch);background:var(--patch-bg);padding:9px 14px;border-radius:0 8px 8px 0;font-size:14px;margin:12px 0;max-width:72ch}
+.note.info{border-color:var(--accent);background:var(--accent-soft)}
+footer{margin-top:60px;color:var(--muted);font-size:13px}
+@media (max-width:860px){
+  .wrap{grid-template-columns:minmax(0,1fr);gap:0}
+  nav{position:static;max-height:none;padding:20px 0 0}
+  nav .links{display:none}
+  nav.open .links{display:block}
+  nav .menu{display:inline-block}
+  .cols{grid-template-columns:minmax(0,1fr)}
+  .flow div{grid-template-columns:1fr;gap:2px}
+}
+@media (min-width:861px){nav .menu{display:none}}
+nav .menu{margin-top:8px;font:13px var(--f-body);background:var(--surface);border:1px solid var(--line);color:var(--fg);border-radius:6px;padding:6px 12px;cursor:pointer}
+@media (prefers-reduced-motion:no-preference){html{scroll-behavior:smooth}}
+</style>
+
+<div class="wrap">
+<nav id="nav">
+  <div class="brand">Authenticator</div>
+  <div class="ver">API v1 · iDev</div>
+  <button class="menu" id="menu" type="button">Bo'limlar ▾</button>
+  <div class="links" id="links"></div>
+  <button class="theme" id="theme" type="button">Mavzuni almashtirish</button>
+</nav>
+<main>
+  <h1>Authenticator API</h1>
+  <p class="lead">Telefon raqam bilan kirish (JWT) va hamkor servislar nomidan foydalanuvchilarga push-xabar yuborish uchun REST API.</p>
+
+  <div class="base"><label for="baseurl">Base URL</label><input id="baseurl" value="https://loyiha-nomi.vercel.app" spellcheck="false" autocomplete="off"></div>
+  <p style="font-size:13px;color:var(--muted)">Pastdagi <code>curl</code> misollari shu manzilni ishlatadi. Swagger: <code>/docs</code>, OpenAPI: <code>/openapi.json</code>. Barcha so'rov va javoblar JSON, faqat servis ro'yxatdan o'tkazish <code>multipart/form-data</code>.</p>
+
+  <section id="auth">
+    <h2>Autentifikatsiya</h2>
+    <div class="grid3">
+      <div class="cred"><b>Access token</b><span>Foydalanuvchi so'rovlarida <code>Authorization: Bearer …</code> sarlavhasida yuboriladi. Muddati 30 kun.</span></div>
+      <div class="cred"><b>Refresh token</b><span>Faqat <code>/refresh</code> ga yuboriladi. Muddati 60 kun. Har safar yangilanadi, eskisi darhol bekor bo'ladi.</span></div>
+      <div class="cred"><b>Service token</b><span><code>srv_token_…</code> servis yaratilganda beriladi. <code>/messages/send</code> bodysida <code>service_id</code> bilan birga ketadi.</span></div>
+    </div>
+    <h3>Rollar</h3>
+    <div class="tbl"><table>
+      <tr><th>Rol</th><th>Imkoniyati</th></tr>
+      <tr><td class="n">user</td><td>Ro'yxatdan o'tish, bildirishnomalarni ko'rish va o'qilgan deb belgilash.</td></tr>
+      <tr><td class="n">admin</td><td>Yuqoridagilar, ommaviy xabar (broadcast), servis o'chirish.</td></tr>
+      <tr><td class="n">owner</td><td>Hammasi: servis yaratish, ro'yxatni ko'rish, xabar yuborish.</td></tr>
+    </table></div>
+  </section>
+
+  <section id="flow">
+    <h2>Xabar qanday yetib boradi</h2>
+    <p>Push faqat foydalanuvchining bazada <code>device_token</code> i bo'lsa ketadi. Xabar esa token bo'lmasa ham bildirishnomalar ro'yxatiga yoziladi.</p>
+    <div class="flow">
+      <div><b>Mobil ilova</b><span>Login/register paytida FCM tokenni yuboradi, token yangilansa <code>PATCH /device-token</code> ni chaqiradi.</span></div>
+      <div><b>Owner / servis</b><span><code>POST /services/messages/send</code> bilan telefon raqam va matn yuboradi.</span></div>
+      <div><b>Server</b><span>Xabarni <code>notifications</code> jadvaliga yozadi va Firebase (FCM) orqali pushni jo'natadi.</span></div>
+      <div><b>Javob</b><span><code>push_sent</code> true/false va xato bo'lsa <code>push_error</code> matni qaytadi.</span></div>
+    </div>
+    <div class="note info">WebSocket kerak emas. Ilova yopiq bo'lganda ham xabar kelishi uchun FCM ishlatiladi.</div>
+  </section>
+
+  <div id="endpoints"></div>
+
+  <section id="errors">
+    <h2>Xatolar</h2>
+    <p>Barcha xatolar FastAPI formatida qaytadi:</p>
+    <div class="codebox"><pre>{ "detail": "Telefon raqam yoki parol noto'g'ri!" }</pre></div>
+    <div class="tbl" style="margin-top:12px"><table>
+      <tr><th>Kod</th><th>Ma'nosi</th></tr>
+      <tr><td class="n">200 / 201</td><td>Muvaffaqiyatli</td></tr>
+      <tr><td class="n">400</td><td>Biznes-mantiq xatosi (masalan, telefon yoki servis nomi band)</td></tr>
+      <tr><td class="n">401</td><td>Token yo'q, yaroqsiz yoki muddati o'tgan (access, refresh yoki service token)</td></tr>
+      <tr><td class="n">403</td><td>Rol yetarli emas yoki servis sizga tegishli emas</td></tr>
+      <tr><td class="n">404</td><td>Resurs topilmadi</td></tr>
+      <tr><td class="n">422</td><td>So'rov maydonlari noto'g'ri yoki yetishmayapti</td></tr>
+    </table></div>
+  </section>
+  <footer>Authenticator by iDev</footer>
+</main>
+</div>
+
+<script>
+var TOK='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...';
+var USER={id:'5b1f7e2a-9c3d-4e21-8a4f-2d6c1f9b7a10',full_name:'Ibrohim Aliyev',phone_number:'+998901234567',role:'user'};
+var TOKENS={status:'success',access_token:TOK,refresh_token:TOK,token_type:'bearer',user:USER};
+var SVC='8f2a1c3d-4b5e-4f6a-9d7c-1e2b3a4c5d6e', STK='srv_token_a1b2c3d4e5f6...';
+var FCM='fK3p9...qW1x';
+var GROUPS=[
+ {name:'Foydalanuvchilar',eps:[
+  {id:'register',m:'POST',p:'/api/v1/users/register',t:'Ro\'yxatdan o\'tish',auth:'',
+   d:'Hisobni darhol yaratadi va token juftligini qaytaradi. OTP yoki SMS yo\'q.',
+   f:[['full_name','string',1,''],['phone_number','string',1,'Takrorlanmasligi kerak'],['password','string',1,'bcrypt bilan saqlanadi'],['device_token','string',0,'FCM token. Boshqa userda bo\'lsa o\'shandan olib tashlanadi']],
+   req:{full_name:USER.full_name,phone_number:USER.phone_number,password:'S3cur3Pass!',device_token:FCM},
+   res:[[200,TOKENS]],err:[[400,'Telefon raqam allaqachon ro\'yxatdan o\'tgan'],[422,'Maydonlar to\'liq emas']]},
+  {id:'login',m:'POST',p:'/api/v1/users/login',t:'Kirish',auth:'',
+   d:'Yangi access/refresh juftligini beradi. Oldingi refresh token bekor bo\'ladi.',
+   f:[['phone_number','string',1,''],['password','string',1,''],['device_token','string',0,'Yuborilsa, shu qurilmaga biriktiriladi']],
+   req:{phone_number:USER.phone_number,password:'S3cur3Pass!',device_token:FCM},
+   res:[[200,TOKENS]],err:[[404,'Telefon raqam ro\'yxatdan o\'tmagan'],[401,'Parol noto\'g\'ri']]},
+  {id:'refresh',m:'POST',p:'/api/v1/users/refresh',t:'Tokenni yangilash',auth:'',
+   d:'Access token tugagach, foydalanuvchini qayta kirgizmasdan yangi juftlik oladi. Eski refresh token ishlamay qoladi.',
+   f:[['refresh_token','string',1,'Oxirgi berilgan refresh token']],
+   req:{refresh_token:TOK},res:[[200,TOKENS]],err:[[401,'Refresh token yaroqsiz, muddati o\'tgan yoki allaqachon almashtirilgan']]},
+  {id:'device-token',m:'PATCH',p:'/api/v1/users/device-token',t:'Device tokenni yangilash',auth:'user',isNew:1,
+   d:'FCM token o\'zgarganda (<code>onNewToken</code>) ilova shuni chaqiradi. Token faqat shu userga biriktiriladi.',
+   f:[['device_token','string',1,'Kamida 10 belgi']],
+   req:{device_token:FCM},res:[[200,{status:'success',detail:'Device token yangilandi'}]],err:[[401,'Access token yaroqsiz'],[422,'Token juda qisqa yoki yo\'q']]},
+  {id:'logout',m:'POST',p:'/api/v1/users/logout',t:'Chiqish',auth:'user',
+   d:'Refresh tokenni bekor qiladi va <code>device_token</code> ni tozalaydi, shuning uchun chiqqan userga push kelmaydi.',
+   req:null,res:[[200,{detail:'Tizimdan muvaffaqiyatli chiqildi'}]],err:[[401,'Access token yaroqsiz']]},
+  {id:'me',m:'GET',p:'/api/v1/users/me',t:'Joriy foydalanuvchi',auth:'user',
+   d:'Saqlangan token hali yaroqli ekanini tekshirish uchun qulay.',
+   req:null,res:[[200,USER]],err:[[401,'Access token yaroqsiz yoki refresh token yuborilgan']]}
+ ]},
+ {name:'Servislar',eps:[
+  {id:'svc-register',m:'POST',p:'/services/register',t:'Servis yaratish',auth:'owner',form:1,
+   d:'Servis yaratadi va doimiy <code>token</code> beradi. Tokenni xavfsiz saqlang. Logo fayl yoki URL ko\'rinishida yuboriladi.',
+   f:[['name','string',1,'3–50 belgi, noyob. Masalan <code>jamgarma_app</code>'],['title','string',1,'2–150 belgi. Pushda sarlavha bo\'lib chiqadi'],['about','string',0,'Servis haqida'],['logo','file',0,'.jpg .jpeg .png .webp'],['logo_url','string',0,'Fayl o\'rniga havola']],
+   req:{name:'jamgarma_app',title:'Jamg\'arma Moliya MCHJ',about:'Onlayn jamg\'arma xizmati',logo_url:'https://example.com/logo.png'},
+   res:[[201,{status:'success',service_id:SVC,token:STK}]],err:[[400,'Nom band yoki fayl turi noto\'g\'ri'],[403,'Faqat owner']]},
+  {id:'send',m:'POST',p:'/services/messages/send',t:'Xabar yuborish',auth:'owner',
+   d:'Foydalanuvchiga telefon raqami bo\'yicha xabar yuboradi. Xabar bazaga yoziladi va FCM orqali push jo\'natiladi.',
+   f:[['service_id','uuid',1,'Servis ID'],['token','string',1,'Servis tokeni'],['user_phone','string',1,'Qabul qiluvchi telefoni'],['message','string',1,'Xabar matni']],
+   req:{service_id:SVC,token:STK,user_phone:USER.phone_number,message:'To\'lovingiz muvaffaqiyatli amalga oshirildi.'},
+   res:[[200,{status:'success',message:'Xabar saqlandi va push yuborildi',push_sent:true,push_error:null}],[200,{status:'success',message:'Xabar saqlandi, lekin push yuborilmadi',push_sent:false,push_error:'UnregisteredError: Requested entity was not found.'}]],
+   err:[[401,'service_id yoki token noto\'g\'ri, yoki servis faol emas'],[403,'Faqat owner'],[404,'Telefon raqamli foydalanuvchi topilmadi']],
+   note:'<code>push_error</code> sinov paytida sababni ko\'rsatadi. Productionda uni javobdan olib tashlash mumkin. <code>device_token yo\'q</code> degan xabar ilova tokenni yubormaganini bildiradi.'},
+  {id:'broadcast',m:'POST',p:'/services/broadcast',t:'Ommaviy xabar',auth:'admin',
+   d:'Tokeni bor barcha foydalanuvchilarga push yuboradi. Ish fonda bajariladi, javob darhol qaytadi.',
+   f:[['title','string',1,'Eng ko\'pi 150 belgi'],['message','string',1,'Eng ko\'pi 1000 belgi']],
+   req:{title:'Yangilanish',message:'Ilovaning yangi versiyasi chiqdi.'},
+   res:[[200,{status:'success',message:'Ommaviy xabar fonda yuborish uchun navbatga qo\'shildi.'}]],err:[[403,'Faqat admin yoki owner']],
+   note:'Bu xabar bildirishnomalar jadvaliga yozilmaydi, faqat push ketadi.'},
+  {id:'svc-list',m:'GET',p:'/services/get',t:'Servislar ro\'yxati',auth:'owner',
+   d:'Barcha servislarni tokeni bilan qaytaradi.',req:null,
+   res:[[200,[{id:SVC,name:'jamgarma_app',title:'Jamg\'arma Moliya MCHJ',logo_url:'/static/3f1c.png',about:'Onlayn jamg\'arma xizmati',token:STK}]]],err:[[403,'Faqat owner'],[404,'Servislar yo\'q']]},
+  {id:'svc-delete',m:'DELETE',p:'/services/delete?service_token={token}',t:'Servisni o\'chirish',auth:'admin',
+   d:'Servis tokeni bo\'yicha o\'chiradi. Admin hammasini, boshqa rol faqat o\'zinikini o\'chira oladi. Servisning bildirishnomalari ham o\'chadi.',
+   f:[['service_token','query',1,'Servis tokeni']],req:null,
+   res:[[200,{message:'Service muvaffaqiyatli o\'chirildi !',status:200}]],err:[[403,'Huquq yetarli emas yoki servis sizniki emas'],[404,'Bunday tokenli servis yo\'q']]}
+ ]},
+ {name:'Bildirishnomalar',eps:[
+  {id:'notif-list',m:'GET',p:'/api/v1/notifications',t:'Ro\'yxat',auth:'user',
+   d:'Foydalanuvchining o\'z bildirishnomalari, yangilari birinchi.',req:null,
+   res:[[200,[{id:'1c2d3e4f-5a6b-7c8d-9e0f-1a2b3c4d5e6f',service_id:SVC,message:'To\'lovingiz muvaffaqiyatli amalga oshirildi.',is_read:false,sent_at:'2026-10-24T08:02:11.482913+00:00'}]]],err:[[401,'Access token yaroqsiz']]},
+  {id:'notif-read',m:'PATCH',p:'/api/v1/notifications/{notification_id}/read',t:'O\'qilgan deb belgilash',auth:'user',
+   d:'Bildirishnomani <code>is_read: true</code> qiladi va yangilangan holini qaytaradi.',req:null,
+   res:[[200,{id:'1c2d3e4f-5a6b-7c8d-9e0f-1a2b3c4d5e6f',service_id:SVC,message:'To\'lovingiz muvaffaqiyatli amalga oshirildi.',is_read:true,sent_at:'2026-10-24T08:02:11.482913+00:00'}]],err:[[404,'Bildirishnoma topilmadi yoki sizniki emas']]}
+ ]},
+ {name:'Tizim',eps:[
+  {id:'health',m:'GET',p:'/health',t:'Holat tekshiruvi',auth:'',d:'Autentifikatsiyasiz. Deploy ishlayotganini tekshirish uchun. <code>GET /</code> ham xuddi shunday ishlaydi.',req:null,res:[[200,{status:'ok'}]],err:[]}
+ ]}
+];
+var AUTHLABEL={user:'Bearer token',admin:'Admin yoki owner',owner:'Faqat owner'};
+
+function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
+function hl(obj){
+  var j=esc(JSON.stringify(obj,null,2));
+  return j.replace(/("(?:[^"\\]|\\.)*")(\s*:)?|\b(true|false|null)\b|(-?\d+(?:\.\d+)?)/g,function(m,str,colon,kw,num){
+    if(str) return colon?'<span class="k">'+str+'</span>'+colon:'<span class="s">'+str+'</span>';
+    if(kw) return '<span class="nu">'+kw+'</span>';
+    return '<span class="nu">'+num+'</span>';});
+}
+function base(){return (document.getElementById('baseurl').value||'').replace(/\/+$/,'')}
+function curl(e){
+  var url=base()+e.p, h=[];
+  var s='curl -X '+e.m+' "'+url+'"';
+  if(e.auth==='user'||e.auth==='admin'||e.auth==='owner') s+=' \\\n  -H "Authorization: Bearer <access_token>"';
+  if(e.form&&e.req){ Object.keys(e.req).forEach(function(k){s+=' \\\n  -F "'+k+'='+e.req[k]+'"'}); s+=' \\\n  -F "logo=@logo.png"'; }
+  else if(e.req){ s+=' \\\n  -H "Content-Type: application/json" \\\n  -d \''+JSON.stringify(e.req,null,2).replace(/\n/g,'\n  ')+'\''; }
+  return s;
+}
+function fieldsTable(e){
+  if(!e.f) return '';
+  var r=e.f.map(function(f){return '<tr><td class="n">'+f[0]+'</td><td class="n">'+f[1]+'</td><td>'+(f[2]?'<span class="req">majburiy</span>':'<span class="opt">ixtiyoriy</span>')+'</td><td>'+f[3]+'</td></tr>'}).join('');
+  var title=e.form?'Form maydonlari':(e.m==='DELETE'||e.m==='GET'?'Parametrlar':'Body');
+  return '<h3>'+title+'</h3><div class="tbl"><table><tr><th>Maydon</th><th>Tur</th><th></th><th>Izoh</th></tr>'+r+'</table></div>';
+}
+function box(tag,html,id){return '<div class="codebox"><span class="tag">'+tag+'</span><button type="button" data-copy="'+id+'">Nusxa</button><pre id="'+id+'">'+html+'</pre></div>'}
+var store={};
+function render(){
+  var nav='',out='';
+  GROUPS.forEach(function(g){
+    nav+='<h6>'+g.name+'</h6>';
+    out+='<section><h2>'+g.name+'</h2>';
+    g.eps.forEach(function(e){
+      nav+='<a href="#'+e.id+'" data-id="'+e.id+'"><span class="m '+e.m+'">'+e.m+'</span>'+e.t+'</a>';
+      var lock=e.auth?'<span class="pill lock">🔒 '+AUTHLABEL[e.auth]+'</span>':'<span class="pill">ochiq</span>';
+      var nw=e.isNew?'<span class="pill new">yangi</span>':'';
+      var left=fieldsTable(e);
+      if(e.req&&!e.form){var rid='rq-'+e.id; store[rid]=JSON.stringify(e.req,null,2); left+='<h3>Body namunasi</h3>'+box('json',hl(e.req),rid)}
+      var cid='cu-'+e.id; store[cid]=curl(e);
+      var right='<h3>curl</h3>'+box('bash','<span class="c">'+esc(curl(e))+'</span>',cid);
+      var resHtml='';
+      e.res.forEach(function(r,i){var id='rs-'+e.id+i; store[id]=JSON.stringify(r[1],null,2); resHtml+='<h3><span class="rc ok">'+r[0]+'</span>Javob</h3>'+box('json',hl(r[1]),id)});
+      var errs=e.err.length?'<h3>Xatolar</h3><div class="tbl"><table>'+e.err.map(function(x){return '<tr><td class="n"><span class="rc er">'+x[0]+'</span></td><td>'+x[1]+'</td></tr>'}).join('')+'</table></div>':'';
+      out+='<article class="ep" id="'+e.id+'"><header><h4>'+e.t+' '+nw+'</h4><div class="line"><span class="badge '+e.m+'">'+e.m+'</span><span class="path">'+esc(e.p)+'</span>'+lock+'</div></header><div class="body"><p>'+e.d+'</p>'+(e.note?'<div class="note">'+e.note+'</div>':'')+'<div class="cols"><div>'+left+errs+'</div><div>'+right+resHtml+'</div></div></div></article>';
+    });
+    out+='</section>';
+  });
+  nav='<a href="#auth" data-id="auth">Autentifikatsiya</a><a href="#flow" data-id="flow">Xabar oqimi</a>'+nav+'<h6>Boshqa</h6><a href="#errors" data-id="errors">Xatolar</a>';
+  document.getElementById('links').innerHTML=nav;
+  document.getElementById('endpoints').innerHTML=out;
+}
+function refreshCurl(){
+  GROUPS.forEach(function(g){g.eps.forEach(function(e){
+    var el=document.getElementById('cu-'+e.id); if(el){store['cu-'+e.id]=curl(e); el.innerHTML='<span class="c">'+esc(curl(e))+'</span>'}
+  })});
+}
+try{var sv=localStorage.getItem('auth-docs-base'); if(sv) document.getElementById('baseurl').value=sv}catch(e){}
+render();
+document.getElementById('baseurl').addEventListener('input',function(){
+  try{localStorage.setItem('auth-docs-base',this.value)}catch(e){}
+  refreshCurl();
+});
+document.getElementById('endpoints').addEventListener('click',function(ev){
+  var b=ev.target.closest('button[data-copy]'); if(!b) return;
+  var id=b.getAttribute('data-copy'), txt=store[id]||document.getElementById(id).textContent;
+  function done(){var o=b.textContent;b.textContent='Nusxalandi';setTimeout(function(){b.textContent=o},1400)}
+  function fallback(){var r=document.createRange();r.selectNodeContents(document.getElementById(id));var s=getSelection();s.removeAllRanges();s.addRange(r);b.textContent='Belgilandi';setTimeout(function(){b.textContent='Nusxa'},1400)}
+  try{navigator.clipboard.writeText(txt).then(done,fallback)}catch(e){fallback()}
+});
+var navEl=document.getElementById('nav');
+document.getElementById('menu').addEventListener('click',function(){navEl.classList.toggle('open')});
+document.getElementById('links').addEventListener('click',function(ev){if(ev.target.closest('a')) navEl.classList.remove('open')});
+document.getElementById('theme').addEventListener('click',function(){
+  var r=document.documentElement, dark=r.getAttribute('data-theme')?r.getAttribute('data-theme')==='dark':matchMedia('(prefers-color-scheme:dark)').matches;
+  r.setAttribute('data-theme',dark?'light':'dark');
+});
+var links=[].slice.call(document.querySelectorAll('#links a'));
+var targets=links.map(function(a){return document.getElementById(a.dataset.id)});
+if('IntersectionObserver' in window){
+  var io=new IntersectionObserver(function(es){es.forEach(function(en){if(en.isIntersecting){
+    links.forEach(function(a){a.classList.toggle('on',a.dataset.id===en.target.id)})}})},{rootMargin:'-10% 0px -80% 0px'});
+  targets.forEach(function(t){t&&io.observe(t)});
+}
+</script>
+
+</body></html>
