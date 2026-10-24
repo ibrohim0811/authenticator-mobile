@@ -14,102 +14,105 @@ import {
   Dimensions,
   Image,
   TextInput,
+  StatusBar,
   Modal,
+  ScrollView,
 } from 'react-native';
 import { router } from 'expo-router';
-import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
-import { notificationService, authService, parseApiError, getFullLogoUrl } from '../services/api';
+import { notificationService, authService, servicesService, parseApiError, getFullLogoUrl } from '../services/api';
 import { useTheme } from '../context/ThemeContext';
 import { useToast } from '../context/ToastContext';
 import { requestPushPermissions, sendLocalPushNotification } from '../services/pushNotifications';
 import OwnerPanelModal from '../components/OwnerPanelModal';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
-const DRAWER_WIDTH = Math.min(SCREEN_WIDTH * 0.82, 340);
 
 interface NotificationItem {
   id: string;
   service_id?: string;
   service_name?: string;
+  service_title?: string;
   logo_url?: string;
+  about?: string;
   message: string;
   is_read?: boolean;
   sent_at?: string;
   created_at?: string;
 }
 
-interface ServiceItem {
-  id: string;
-  name: string;
-  title: string;
-  logo_url?: string;
-  icon: keyof typeof Ionicons.glyphMap;
-  color: string;
-  latestMessage?: string;
-  count: number;
+interface ConversationGroup {
+  serviceId: string;
+  serviceName: string;
+  serviceTitle: string;
+  logoUrl?: string;
+  about?: string;
+  lastMessage: string;
+  lastTime: string;
+  unreadCount: number;
+  totalCount: number;
+  notifications: NotificationItem[];
 }
-
-const ALL_SERVICES_ID = 'all';
 
 export default function NotificationsScreen() {
   const { theme, colors, toggleTheme } = useTheme();
   const { showToast } = useToast();
+  const isDark = theme === 'dark';
 
   const [list, setList] = useState<NotificationItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [userInfo, setUserInfo] = useState<{ id?: string; full_name?: string; phone_number?: string; role?: string } | null>(null);
-  const [isOwner, setIsOwner] = useState(false);
+  const [isPrivileged, setIsPrivileged] = useState(false);
 
   // Owner Panel Modal State
   const [ownerModalVisible, setOwnerModalVisible] = useState(false);
 
-  // Notification Detail Modal State
-  const [selectedNotif, setSelectedNotif] = useState<NotificationItem | null>(null);
+  // Service info cache
+  const [serviceCache, setServiceCache] = useState<Record<string, { name: string; title: string; logo_url?: string; about?: string }>>({});
 
-  // Filter & Search State
+  // Search
   const [searchQuery, setSearchQuery] = useState('');
+  const [isSearchActive, setIsSearchActive] = useState(false);
+
+  // Filter mode: all | unread
   const [filterMode, setFilterMode] = useState<'all' | 'unread'>('all');
 
-  // Track known notification IDs to trigger push notification for new ones
+  // Service detail modal
+  const [selectedService, setSelectedService] = useState<ConversationGroup | null>(null);
+  const [serviceModalVisible, setServiceModalVisible] = useState(false);
+
+  // Track known notification IDs
   const previousNotifIdsRef = useRef<Set<string>>(new Set());
 
-  // Left Drawer state & animation
-  const [isDrawerOpen, setIsDrawerOpen] = useState(false);
-  const [selectedServiceId, setSelectedServiceId] = useState<string>(ALL_SERVICES_ID);
-  const drawerAnim = useRef(new Animated.Value(-DRAWER_WIDTH)).current;
-  const overlayAnim = useRef(new Animated.Value(0)).current;
-
-  const toggleDrawer = (open: boolean) => {
-    setIsDrawerOpen(open);
-    Animated.parallel([
-      Animated.timing(drawerAnim, {
-        toValue: open ? 0 : -DRAWER_WIDTH,
-        duration: 280,
-        useNativeDriver: true,
-      }),
-      Animated.timing(overlayAnim, {
-        toValue: open ? 1 : 0,
-        duration: 280,
-        useNativeDriver: true,
-      }),
-    ]).start();
-  };
+  // Animations
+  const scrollY = useRef(new Animated.Value(0)).current;
 
   const fetchUser = async () => {
     try {
       const data = await authService.getCurrentUser();
-      if (data) {
-        setUserInfo(data);
-      }
+      if (data) setUserInfo(data);
       const role = await authService.getUserRole();
-      const ownerCheck =
-        (data?.role && String(data.role).toLowerCase() === 'owner') ||
-        (role && role.toLowerCase() === 'owner');
-      setIsOwner(Boolean(ownerCheck));
+      const resolvedRole = (data?.role ? String(data.role).toLowerCase() : null) || (role ? role.toLowerCase() : null);
+      const privileged = resolvedRole === 'owner' || resolvedRole === 'admin';
+      setIsPrivileged(privileged);
     } catch (err: any) {
       console.log('User fetch info error:', parseApiError(err));
+    }
+  };
+
+  const fetchServiceCache = async () => {
+    try {
+      const services = await servicesService.getServices();
+      const cache: Record<string, { name: string; title: string; logo_url?: string; about?: string }> = {};
+      services.forEach((s: any) => {
+        if (s.id) {
+          cache[s.id] = { name: s.name, title: s.title, logo_url: s.logo_url, about: s.about };
+        }
+      });
+      setServiceCache(cache);
+    } catch {
+      // non-owner users get 403 — fine
     }
   };
 
@@ -124,13 +127,24 @@ export default function NotificationsScreen() {
         rawItems = data.items;
       }
 
+      // Merge service cache info
+      rawItems = rawItems.map((item) => {
+        const cached = item.service_id ? serviceCache[item.service_id] : undefined;
+        return {
+          ...item,
+          service_name: item.service_name || cached?.name,
+          service_title: item.service_title || cached?.title,
+          logo_url: item.logo_url || cached?.logo_url,
+          about: item.about || cached?.about,
+        };
+      });
+
       setList(rawItems);
 
-      // Detect new incoming notifications and trigger Phone Push Notifications
+      // Detect new notifications and trigger push
       if (!isInitial && rawItems.length > 0) {
         const previousIds = previousNotifIdsRef.current;
         const newItems = rawItems.filter((item) => item.id && !previousIds.has(item.id));
-
         newItems.forEach((newItem) => {
           sendLocalPushNotification({
             title: newItem.service_name || 'Xizmatdan yangi xabar',
@@ -158,67 +172,60 @@ export default function NotificationsScreen() {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [showToast]);
+  }, [showToast, serviceCache]);
 
   useEffect(() => {
     requestPushPermissions();
     fetchUser();
+    fetchServiceCache();
     fetchNotifications(true);
-  }, [fetchNotifications]);
+  }, [fetchNotifications]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const onRefresh = () => {
     setRefreshing(true);
     fetchUser();
+    fetchServiceCache();
     fetchNotifications(false);
   };
 
   const handleMarkAsRead = async (id: string) => {
     try {
       await notificationService.markAsRead(id);
-      setList((prev) =>
-        prev.map((item) => (item.id === id ? { ...item, is_read: true } : item))
-      );
-    } catch (err: any) {
-      // Optimistic update
-      setList((prev) =>
-        prev.map((item) => (item.id === id ? { ...item, is_read: true } : item))
-      );
+      setList((prev) => prev.map((item) => (item.id === id ? { ...item, is_read: true } : item)));
+    } catch {
+      setList((prev) => prev.map((item) => (item.id === id ? { ...item, is_read: true } : item)));
     }
   };
 
   const handleMarkAllAsRead = async () => {
     const unreadItems = list.filter((n) => !n.is_read);
     if (unreadItems.length === 0) {
-      showToast({
-        type: 'info',
-        title: 'Barchasi oʻqilgan',
-        message: 'Oʻqilmagan yangi bildirishnomalar yoʻq.',
-      });
+      showToast({ type: 'info', title: 'Barchasi oʻqilgan', message: 'Oʻqilmagan yangi bildirishnomalar yoʻq.' });
       return;
     }
-
     setList((prev) => prev.map((item) => ({ ...item, is_read: true })));
-
     for (const item of unreadItems) {
-      try {
-        await notificationService.markAsRead(item.id);
-      } catch (e) {
-        // Continue
-      }
+      try { await notificationService.markAsRead(item.id); } catch { /* continue */ }
     }
-
-    showToast({
-      type: 'success',
-      title: 'Barchasi oʻqildi',
-      message: 'Barcha bildirishnomalar oʻqilgan deb belgilandi.',
-    });
+    showToast({ type: 'success', title: 'Barchasi oʻqildi', message: 'Barcha bildirishnomalar oʻqilgan deb belgilandi.' });
   };
 
   const handleOpenNotification = (item: NotificationItem) => {
-    setSelectedNotif(item);
-    if (!item.is_read) {
-      handleMarkAsRead(item.id);
-    }
+    if (!item.is_read) handleMarkAsRead(item.id);
+    router.push({
+      pathname: '/notification-detail' as any,
+      params: {
+        id: item.id,
+        service_id: item.service_id ?? '',
+        service_name: item.service_name ?? '',
+        service_title: item.service_title ?? item.service_name ?? '',
+        logo_url: item.logo_url ?? '',
+        about: item.about ?? '',
+        message: item.message,
+        sent_at: item.sent_at ?? '',
+        created_at: item.created_at ?? '',
+      },
+    });
   };
 
   const handleLogout = () => {
@@ -235,510 +242,482 @@ export default function NotificationsScreen() {
     ]);
   };
 
-  const formatDate = (isoString?: string) => {
+  /* ── Date formatting (iOS Messages style) ── */
+  const formatTimeAgo = (isoString?: string) => {
     if (!isoString) return '';
     try {
       const date = new Date(isoString);
       if (isNaN(date.getTime())) return isoString;
-      const today = new Date();
-      const isToday = date.toDateString() === today.toDateString();
-      const timeStr = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-      if (isToday) return `Bugun, ${timeStr}`;
-      return `${date.toLocaleDateString([], { month: 'short', day: 'numeric' })}, ${timeStr}`;
-    } catch (e) {
-      return isoString;
+      const now = new Date();
+      const diffMs = now.getTime() - date.getTime();
+      const diffMin = Math.floor(diffMs / 60000);
+      const diffHours = Math.floor(diffMs / 3600000);
+      const diffDays = Math.floor(diffMs / 86400000);
+
+      if (diffMin < 1) return 'Hozir';
+      if (diffMin < 60) return `${diffMin} daq`;
+      if (diffHours < 24 && date.toDateString() === now.toDateString()) {
+        return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      }
+      if (diffDays === 1) return 'Kecha';
+      if (diffDays < 7) {
+        const days = ['Yak', 'Dush', 'Sesh', 'Chor', 'Pay', 'Jum', 'Shan'];
+        return days[date.getDay()];
+      }
+      return date.toLocaleDateString([], { day: 'numeric', month: 'short' });
+    } catch {
+      return '';
     }
   };
 
-  // Dynamically generate services list from fetched notifications
-  const servicesList: ServiceItem[] = React.useMemo(() => {
-    const allServiceItem: ServiceItem = {
-      id: ALL_SERVICES_ID,
-      name: 'all',
-      title: 'Barcha Xizmatlar',
-      icon: 'apps-sharp',
-      color: colors.accent,
-      latestMessage: list.length > 0 ? list[0].message : 'Barcha xizmatlardan bildirishnomalar',
-      count: list.length,
-    };
-
-    const map = new Map<string, ServiceItem>();
+  /* ── Group notifications into conversations (like iOS Messages) ── */
+  const conversations: ConversationGroup[] = React.useMemo(() => {
+    const map = new Map<string, ConversationGroup>();
 
     list.forEach((item) => {
-      const srvId = item.service_id || item.service_name || 'default_service';
-      const srvTitle = item.service_name || 'Hamkor Xizmat';
+      const srvId = item.service_id || item.service_name || 'default';
+      const srvName = item.service_name || 'Xizmat';
+      const srvTitle = item.service_title || item.service_name || 'Hamkor Xizmat';
 
       if (!map.has(srvId)) {
         map.set(srvId, {
-          id: srvId,
-          name: srvId,
-          title: srvTitle,
-          logo_url: item.logo_url,
-          icon: 'shield-checkmark-sharp',
-          color: '#3b82f6',
-          latestMessage: item.message,
-          count: 1,
+          serviceId: srvId,
+          serviceName: srvName,
+          serviceTitle: srvTitle,
+          logoUrl: item.logo_url,
+          about: item.about,
+          lastMessage: item.message,
+          lastTime: item.sent_at || item.created_at || '',
+          unreadCount: item.is_read ? 0 : 1,
+          totalCount: 1,
+          notifications: [item],
         });
       } else {
-        const existing = map.get(srvId)!;
-        existing.count += 1;
+        const group = map.get(srvId)!;
+        group.totalCount += 1;
+        if (!item.is_read) group.unreadCount += 1;
+        group.notifications.push(item);
+        // Keep latest message at top
+        const itemTime = new Date(item.sent_at || item.created_at || 0).getTime();
+        const groupTime = new Date(group.lastTime || 0).getTime();
+        if (itemTime > groupTime) {
+          group.lastMessage = item.message;
+          group.lastTime = item.sent_at || item.created_at || '';
+          group.logoUrl = group.logoUrl || item.logo_url;
+          group.about = group.about || item.about;
+        }
       }
     });
 
-    return [allServiceItem, ...Array.from(map.values())];
-  }, [list, colors.accent]);
+    // Sort by last message time (newest first)
+    return Array.from(map.values()).sort((a, b) => {
+      const ta = new Date(a.lastTime || 0).getTime();
+      const tb = new Date(b.lastTime || 0).getTime();
+      return tb - ta;
+    });
+  }, [list]);
 
-  // Filtered notifications
-  const filteredNotifications = list.filter((item) => {
-    // Service filter
-    if (selectedServiceId !== ALL_SERVICES_ID) {
-      const srvId = item.service_id || item.service_name || 'default_service';
-      if (srvId !== selectedServiceId) return false;
-    }
-
-    // Read/Unread filter
-    if (filterMode === 'unread' && item.is_read) {
-      return false;
-    }
-
-    // Search query filter
+  /* ── Filtered conversations ── */
+  const filteredConversations = conversations.filter((conv) => {
+    if (filterMode === 'unread' && conv.unreadCount === 0) return false;
     if (searchQuery.trim()) {
-      const query = searchQuery.trim().toLowerCase();
-      const matchMsg = item.message?.toLowerCase().includes(query);
-      const matchService = item.service_name?.toLowerCase().includes(query);
-      return matchMsg || matchService;
+      const q = searchQuery.trim().toLowerCase();
+      return (
+        conv.serviceTitle.toLowerCase().includes(q) ||
+        conv.serviceName.toLowerCase().includes(q) ||
+        conv.lastMessage.toLowerCase().includes(q)
+      );
     }
-
     return true;
   });
 
-  const selectedServiceObj =
-    servicesList.find((s) => s.id === selectedServiceId) || servicesList[0];
+  const totalUnread = list.filter((n) => !n.is_read).length;
 
-  const unreadCount = list.filter((n) => !n.is_read).length;
+  /* ── iOS-style colors ── */
+  const iosColors = {
+    bg: isDark ? '#000000' : '#FFFFFF',
+    secondaryBg: isDark ? '#1C1C1E' : '#F2F2F7',
+    separator: isDark ? 'rgba(84,84,88,0.65)' : 'rgba(60,60,67,0.12)',
+    label: isDark ? '#FFFFFF' : '#000000',
+    secondaryLabel: isDark ? 'rgba(235,235,245,0.6)' : 'rgba(60,60,67,0.6)',
+    tertiaryLabel: isDark ? 'rgba(235,235,245,0.3)' : 'rgba(60,60,67,0.3)',
+    blue: '#007AFF',
+    green: '#34C759',
+    red: '#FF3B30',
+    searchBg: isDark ? 'rgba(118,118,128,0.24)' : 'rgba(118,118,128,0.12)',
+    badgeBg: '#007AFF',
+  };
+
+  /* ── Handle open conversation (go to latest notification) ── */
+  const handleOpenConversation = (conv: ConversationGroup) => {
+    // Find the latest notification
+    const sorted = [...conv.notifications].sort((a, b) => {
+      const ta = new Date(a.sent_at || a.created_at || 0).getTime();
+      const tb = new Date(b.sent_at || b.created_at || 0).getTime();
+      return tb - ta;
+    });
+    if (sorted.length > 0) {
+      handleOpenNotification(sorted[0]);
+    }
+  };
+
+  /* ── Show service info modal ── */
+  const handleShowServiceInfo = (conv: ConversationGroup) => {
+    setSelectedService(conv);
+    setServiceModalVisible(true);
+  };
+
+  /* ── Render conversation cell (iOS Messages style) ── */
+  const renderConversation = ({ item: conv }: { item: ConversationGroup }) => {
+    const logoUri = conv.logoUrl ? getFullLogoUrl(conv.logoUrl) : null;
+    const hasUnread = conv.unreadCount > 0;
+    const timeStr = formatTimeAgo(conv.lastTime);
+
+    return (
+      <TouchableOpacity
+        style={styles.conversationCell}
+        onPress={() => handleOpenConversation(conv)}
+        onLongPress={() => handleShowServiceInfo(conv)}
+        activeOpacity={0.6}
+      >
+        {/* Avatar */}
+        <TouchableOpacity
+          onPress={() => handleShowServiceInfo(conv)}
+          activeOpacity={0.7}
+        >
+          {logoUri ? (
+            <Image source={{ uri: logoUri }} style={styles.avatar} />
+          ) : (
+            <View style={[styles.avatarFallback, { backgroundColor: iosColors.blue + '20' }]}>
+              <Text style={[styles.avatarInitial, { color: iosColors.blue }]}>
+                {conv.serviceTitle.charAt(0).toUpperCase()}
+              </Text>
+            </View>
+          )}
+        </TouchableOpacity>
+
+        {/* Content */}
+        <View style={styles.conversationContent}>
+          {/* Top row: title + time */}
+          <View style={styles.conversationTopRow}>
+            <Text
+              style={[
+                styles.conversationTitle,
+                { color: iosColors.label },
+                hasUnread && styles.conversationTitleBold,
+              ]}
+              numberOfLines={1}
+            >
+              {conv.serviceTitle}
+            </Text>
+            <View style={styles.timeChevronRow}>
+              <Text style={[styles.conversationTime, { color: hasUnread ? iosColors.blue : iosColors.secondaryLabel }]}>
+                {timeStr}
+              </Text>
+              <Ionicons name="chevron-forward" size={14} color={iosColors.tertiaryLabel} style={{ marginLeft: 4 }} />
+            </View>
+          </View>
+
+          {/* Bottom row: last message + badge */}
+          <View style={styles.conversationBottomRow}>
+            <Text
+              style={[
+                styles.conversationPreview,
+                { color: iosColors.secondaryLabel },
+                hasUnread && { color: isDark ? '#EBEBF5' : '#3C3C43' },
+              ]}
+              numberOfLines={2}
+            >
+              {conv.lastMessage}
+            </Text>
+            {hasUnread && (
+              <View style={[styles.unreadBadge, { backgroundColor: iosColors.badgeBg }]}>
+                <Text style={styles.unreadBadgeText}>{conv.unreadCount}</Text>
+              </View>
+            )}
+          </View>
+
+          {/* Separator line */}
+          <View style={[styles.cellSeparator, { backgroundColor: iosColors.separator }]} />
+        </View>
+      </TouchableOpacity>
+    );
+  };
 
   return (
-    <LinearGradient colors={colors.bg} style={styles.container}>
+    <View style={[styles.container, { backgroundColor: iosColors.bg }]}>
+      <StatusBar barStyle={isDark ? 'light-content' : 'dark-content'} />
       <SafeAreaView style={styles.safeArea}>
-        {/* TOP NAVIGATION BAR */}
-        <View style={styles.topBar}>
-          {/* Hamburger Drawer Toggle */}
-          <TouchableOpacity
-            style={[styles.hamburgerBtn, { borderColor: colors.cardBorder, backgroundColor: colors.cardBg }]}
-            onPress={() => toggleDrawer(true)}
-            activeOpacity={0.8}
-          >
-            <Ionicons name="menu-sharp" size={22} color={colors.accent} />
-          </TouchableOpacity>
 
-          {/* User Info Header with Role Badge */}
-          <View style={styles.userHead}>
-            <View style={styles.userNameRow}>
-              <Text style={[styles.userNameText, { color: colors.textPrimary }]} numberOfLines={1}>
-                {userInfo?.full_name || 'Foydalanuvchi'}
-              </Text>
-              {isOwner && (
-                <View style={styles.ownerBadge}>
-                  <Text style={styles.ownerBadgeText}>OWNER</Text>
-                </View>
-              )}
-            </View>
-            <Text style={[styles.userSubText, { color: colors.textMuted }]} numberOfLines={1}>
-              {userInfo?.phone_number || 'Faol Seans'}
-            </Text>
-          </View>
-
-          {/* Top Actions: Admin (Owner Only) | Theme Toggle | Logout */}
-          <View style={styles.topActions}>
-            {/* ADMIN ICON (ONLY FOR OWNER) */}
-            {isOwner && (
-              <TouchableOpacity
-                style={[
-                  styles.iconCircle,
-                  styles.adminOwnerBtn,
-                  { backgroundColor: 'rgba(234, 179, 8, 0.16)', borderColor: '#eab308' },
-                ]}
-                onPress={() => setOwnerModalVisible(true)}
-                activeOpacity={0.8}
-              >
-                <Ionicons name="shield-checkmark" size={20} color="#eab308" />
+        {/* ─── iOS-style Header ─── */}
+        <View style={styles.header}>
+          <View style={styles.headerTopRow}>
+            {/* Edit / Admin button */}
+            {isPrivileged ? (
+              <TouchableOpacity onPress={() => setOwnerModalVisible(true)} activeOpacity={0.6}>
+                <Text style={[styles.headerAction, { color: iosColors.blue }]}>Boshqaruv</Text>
+              </TouchableOpacity>
+            ) : (
+              <TouchableOpacity onPress={toggleTheme} activeOpacity={0.6}>
+                <Ionicons
+                  name={isDark ? 'sunny-outline' : 'moon-outline'}
+                  size={22}
+                  color={iosColors.blue}
+                />
               </TouchableOpacity>
             )}
 
-            <TouchableOpacity
-              style={[styles.iconCircle, { backgroundColor: colors.cardBg, borderColor: colors.cardBorder }]}
-              onPress={toggleTheme}
-            >
-              <Ionicons
-                name={theme === 'dark' ? 'sunny-outline' : 'moon-outline'}
-                size={18}
-                color={colors.accent}
-              />
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={[styles.iconCircle, { backgroundColor: colors.cardBg, borderColor: colors.cardBorder }]}
-              onPress={handleLogout}
-            >
-              <Ionicons name="log-out-outline" size={18} color="#ef4444" />
-            </TouchableOpacity>
-          </View>
-        </View>
-
-        {/* QUICK STATS & GLANCE BANNER */}
-        <View style={styles.statsRow}>
-          <View style={[styles.statCard, { backgroundColor: colors.cardBg, borderColor: colors.cardBorder }]}>
-            <Text style={[styles.statValue, { color: colors.textPrimary }]}>{list.length}</Text>
-            <Text style={[styles.statLabel, { color: colors.textMuted }]}>Jami</Text>
+            {/* Right side actions */}
+            <View style={styles.headerRightActions}>
+              {isPrivileged && (
+                <TouchableOpacity onPress={toggleTheme} activeOpacity={0.6} style={{ marginRight: 20 }}>
+                  <Ionicons
+                    name={isDark ? 'sunny-outline' : 'moon-outline'}
+                    size={22}
+                    color={iosColors.blue}
+                  />
+                </TouchableOpacity>
+              )}
+              <TouchableOpacity onPress={handleLogout} activeOpacity={0.6}>
+                <Ionicons name="log-out-outline" size={22} color={iosColors.red} />
+              </TouchableOpacity>
+            </View>
           </View>
 
-          <View style={[styles.statCard, { backgroundColor: colors.cardBg, borderColor: unreadCount > 0 ? colors.accent : colors.cardBorder }]}>
-            <Text style={[styles.statValue, { color: unreadCount > 0 ? colors.accent : colors.textPrimary }]}>
-              {unreadCount}
+          {/* Large title */}
+          <Text style={[styles.largeTitle, { color: iosColors.label }]}>Xabarlar</Text>
+
+          {/* User info subtitle */}
+          <View style={styles.userInfoRow}>
+            <Text style={[styles.userInfoText, { color: iosColors.secondaryLabel }]}>
+              {userInfo?.full_name || 'Foydalanuvchi'}
             </Text>
-            <Text style={[styles.statLabel, { color: colors.textMuted }]}>Oʻqilmagan</Text>
+            {isPrivileged && (
+              <View style={[styles.roleBadge, { backgroundColor: userInfo?.role?.toLowerCase() === 'admin' ? '#6366f1' : '#F59E0B' }]}>
+                <Text style={styles.roleBadgeText}>{userInfo?.role?.toUpperCase() ?? 'ADMIN'}</Text>
+              </View>
+            )}
           </View>
 
-          <View style={[styles.statCard, { backgroundColor: colors.cardBg, borderColor: colors.cardBorder }]}>
-            <Text style={[styles.statValue, { color: colors.textPrimary }]}>{servicesList.length - 1}</Text>
-            <Text style={[styles.statLabel, { color: colors.textMuted }]}>Xizmatlar</Text>
-          </View>
-
-          <TouchableOpacity
-            style={[styles.markAllBtn, { backgroundColor: colors.cardBg, borderColor: colors.cardBorder }]}
-            onPress={handleMarkAllAsRead}
-          >
-            <Ionicons name="checkmark-done" size={18} color={colors.accent} />
-            <Text style={[styles.markAllTxt, { color: colors.accent }]}>Oʻqildi</Text>
-          </TouchableOpacity>
-        </View>
-
-        {/* SEARCH & FILTERS BAR */}
-        <View style={styles.searchFilterContainer}>
-          <View style={[styles.searchBox, { backgroundColor: colors.inputBg, borderColor: colors.inputBorder }]}>
-            <Ionicons name="search-outline" size={18} color={colors.textMuted} style={{ marginRight: 8 }} />
+          {/* iOS Search bar */}
+          <View style={[styles.searchBar, { backgroundColor: iosColors.searchBg }]}>
+            <Ionicons name="search" size={16} color={iosColors.secondaryLabel} />
             <TextInput
-              style={[styles.searchInput, { color: colors.textPrimary }]}
-              placeholder="Xabarlarni qidirish..."
-              placeholderTextColor={colors.textMuted}
+              style={[styles.searchInput, { color: iosColors.label }]}
+              placeholder="Qidirish"
+              placeholderTextColor={iosColors.secondaryLabel}
               value={searchQuery}
               onChangeText={setSearchQuery}
+              onFocus={() => setIsSearchActive(true)}
+              onBlur={() => { if (!searchQuery) setIsSearchActive(false); }}
             />
             {searchQuery.length > 0 && (
-              <TouchableOpacity onPress={() => setSearchQuery('')}>
-                <Ionicons name="close-circle" size={16} color={colors.textMuted} />
+              <TouchableOpacity onPress={() => { setSearchQuery(''); setIsSearchActive(false); }}>
+                <Ionicons name="close-circle" size={16} color={iosColors.secondaryLabel} />
               </TouchableOpacity>
             )}
           </View>
 
-          <View style={styles.filterPillsRow}>
+          {/* Filter pills (iOS style segmented) */}
+          <View style={styles.filterRow}>
             <TouchableOpacity
               style={[
-                styles.filterPill,
-                filterMode === 'all' && [styles.activeFilterPill, { backgroundColor: colors.accent }],
-                { borderColor: colors.cardBorder },
+                styles.filterChip,
+                { backgroundColor: filterMode === 'all' ? iosColors.blue : iosColors.searchBg },
               ]}
               onPress={() => setFilterMode('all')}
             >
-              <Text style={[styles.filterPillTxt, { color: filterMode === 'all' ? '#fff' : colors.textMuted }]}>
+              <Text style={[styles.filterChipText, { color: filterMode === 'all' ? '#FFFFFF' : iosColors.secondaryLabel }]}>
                 Barchasi
               </Text>
             </TouchableOpacity>
 
             <TouchableOpacity
               style={[
-                styles.filterPill,
-                filterMode === 'unread' && [styles.activeFilterPill, { backgroundColor: colors.accent }],
-                { borderColor: colors.cardBorder },
+                styles.filterChip,
+                { backgroundColor: filterMode === 'unread' ? iosColors.blue : iosColors.searchBg },
               ]}
               onPress={() => setFilterMode('unread')}
             >
-              <Text style={[styles.filterPillTxt, { color: filterMode === 'unread' ? '#fff' : colors.textMuted }]}>
-                Faqat yangilar ({unreadCount})
+              <Text style={[styles.filterChipText, { color: filterMode === 'unread' ? '#FFFFFF' : iosColors.secondaryLabel }]}>
+                O'qilmagan {totalUnread > 0 ? `(${totalUnread})` : ''}
               </Text>
+            </TouchableOpacity>
+
+            {/* Mark all as read */}
+            <TouchableOpacity
+              style={[styles.filterChip, { backgroundColor: iosColors.searchBg, marginLeft: 'auto' }]}
+              onPress={handleMarkAllAsRead}
+            >
+              <Ionicons name="checkmark-done" size={14} color={iosColors.blue} />
             </TouchableOpacity>
           </View>
         </View>
 
-        {/* ACTIVE SERVICE BADGE BANNER */}
-        {selectedServiceId !== ALL_SERVICES_ID && (
-          <View style={[styles.activeFilterBanner, { backgroundColor: `${colors.accent}15`, borderColor: colors.accent }]}>
-            <Text style={[styles.activeFilterTxt, { color: colors.accent }]}>
-              Filtr: {selectedServiceObj.title}
-            </Text>
-            <TouchableOpacity onPress={() => setSelectedServiceId(ALL_SERVICES_ID)}>
-              <Ionicons name="close" size={16} color={colors.accent} />
-            </TouchableOpacity>
-          </View>
-        )}
-
-        {/* NOTIFICATIONS LIST */}
+        {/* ─── Conversation List ─── */}
         {loading ? (
           <View style={styles.centerContainer}>
-            <ActivityIndicator size="large" color={colors.accent} />
-            <Text style={[styles.loadingText, { color: colors.textMuted }]}>
+            <ActivityIndicator size="large" color={iosColors.blue} />
+            <Text style={[styles.loadingText, { color: iosColors.secondaryLabel }]}>
               Xabarlar yuklanmoqda...
             </Text>
           </View>
         ) : (
           <FlatList
-            data={filteredNotifications}
-            keyExtractor={(item, index) => item.id?.toString() || index.toString()}
+            data={filteredConversations}
+            keyExtractor={(item) => item.serviceId}
+            renderItem={renderConversation}
             refreshControl={
               <RefreshControl
                 refreshing={refreshing}
                 onRefresh={onRefresh}
-                tintColor={colors.accent}
-                colors={[colors.accent]}
+                tintColor={iosColors.blue}
+                colors={[iosColors.blue]}
               />
             }
             contentContainerStyle={styles.listContent}
+            showsVerticalScrollIndicator={false}
             ListEmptyComponent={
               <View style={styles.emptyContainer}>
-                <Ionicons name="notifications-off-outline" size={56} color={colors.textMuted} />
-                <Text style={[styles.emptyTitle, { color: colors.textSecondary }]}>
-                  Bildirishnomalar topilmadi
+                <View style={[styles.emptyIconWrap, { backgroundColor: iosColors.searchBg }]}>
+                  <Ionicons name="chatbubbles-outline" size={48} color={iosColors.tertiaryLabel} />
+                </View>
+                <Text style={[styles.emptyTitle, { color: iosColors.label }]}>
+                  Xabarlar yo'q
                 </Text>
-                <Text style={[styles.emptySub, { color: colors.textMuted }]}>
+                <Text style={[styles.emptySub, { color: iosColors.secondaryLabel }]}>
                   {searchQuery
-                    ? `"${searchQuery}" boʻyicha birorta ham xabar topilmadi.`
-                    : 'Yangi kelgan xabarlar avtomatik shu yerda koʻrinadi.'}
+                    ? `"${searchQuery}" bo'yicha natija topilmadi`
+                    : "Yangi xabarlar kelganda shu yerda ko'rinadi"}
                 </Text>
               </View>
             }
-            renderItem={({ item }) => (
-              <TouchableOpacity
-                style={[
-                  styles.glassCard,
-                  { backgroundColor: colors.cardBg, borderColor: colors.cardBorder },
-                  !item.is_read && { borderColor: colors.accent, borderWidth: 1.5 },
-                ]}
-                onPress={() => handleOpenNotification(item)}
-                activeOpacity={0.8}
-              >
-                <View style={styles.cardRow}>
-                  {item.logo_url ? (
-                    <Image
-                      source={{ uri: getFullLogoUrl(item.logo_url) || undefined }}
-                      style={styles.cardLogoImage}
-                    />
-                  ) : (
-                    <View
-                      style={[
-                        styles.cardIconCircle,
-                        !item.is_read && { backgroundColor: `${colors.accent}20` },
-                      ]}
-                    >
-                      <Ionicons
-                        name={item.is_read ? 'mail-open-outline' : 'mail-unread'}
-                        size={20}
-                        color={item.is_read ? colors.textMuted : colors.accent}
-                      />
-                    </View>
-                  )}
-
-                  <View style={{ flex: 1, marginLeft: 12 }}>
-                    <View style={styles.cardTopMeta}>
-                      <Text style={[styles.cardServiceTag, { color: colors.accent }]} numberOfLines={1}>
-                        {item.service_name || 'Xizmat Bildirishnomasi'}
-                      </Text>
-                      <Text style={[styles.cardTime, { color: colors.textMuted }]}>
-                        {formatDate(item.sent_at || item.created_at)}
-                      </Text>
-                    </View>
-
-                    <Text style={[styles.cardMsg, { color: colors.textPrimary }]} numberOfLines={2}>
-                      {item.message}
-                    </Text>
-                  </View>
-
-                  {!item.is_read && (
-                    <View style={[styles.unreadGlowDot, { backgroundColor: colors.accent }]} />
-                  )}
-                </View>
-              </TouchableOpacity>
-            )}
           />
         )}
 
-        {/* OVERLAY BACKDROP FOR DRAWER */}
-        {isDrawerOpen && (
-          <Animated.View style={[styles.overlay, { opacity: overlayAnim }]}>
-            <TouchableOpacity
-              style={{ flex: 1 }}
-              activeOpacity={1}
-              onPress={() => toggleDrawer(false)}
-            />
-          </Animated.View>
-        )}
-
-        {/* LEFT HAMBURGER SERVICES DRAWER */}
-        <Animated.View
-          style={[
-            styles.drawerContainer,
-            {
-              transform: [{ translateX: drawerAnim }],
-              borderColor: colors.cardBorder,
-            },
-          ]}
+        {/* ─── Service Info Modal (iOS style) ─── */}
+        <Modal
+          visible={serviceModalVisible}
+          animationType="slide"
+          transparent
+          onRequestClose={() => setServiceModalVisible(false)}
         >
-          <LinearGradient colors={colors.drawerBg} style={styles.drawerInner}>
-            <View style={[styles.drawerHeader, { borderBottomColor: colors.cardBorder }]}>
-              <View style={styles.drawerHeaderLeft}>
-                <View style={[styles.drawerBadge, { backgroundColor: `${colors.accent}20`, borderColor: colors.cardBorder }]}>
-                  <Ionicons name="cube-sharp" size={20} color={colors.accent} />
-                </View>
-                <Text style={[styles.drawerTitle, { color: colors.textPrimary }]}>Services</Text>
-              </View>
+          <View style={styles.modalBackdrop}>
+            <TouchableOpacity style={StyleSheet.absoluteFill} onPress={() => setServiceModalVisible(false)} />
 
-              <TouchableOpacity style={styles.closeDrawerBtn} onPress={() => toggleDrawer(false)}>
-                <Ionicons name="close-sharp" size={22} color={colors.textMuted} />
+            <View style={[styles.serviceModal, { backgroundColor: isDark ? '#1C1C1E' : '#FFFFFF' }]}>
+              {/* Handle */}
+              <View style={[styles.modalHandle, { backgroundColor: iosColors.tertiaryLabel }]} />
+
+              <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 30 }}>
+                {/* Logo */}
+                <View style={styles.modalLogoWrap}>
+                  {selectedService?.logoUrl ? (
+                    <Image
+                      source={{ uri: getFullLogoUrl(selectedService.logoUrl) || undefined }}
+                      style={styles.modalLogo}
+                    />
+                  ) : (
+                    <View style={[styles.modalLogoFallback, { backgroundColor: iosColors.blue + '20' }]}>
+                      <Text style={[styles.modalLogoInitial, { color: iosColors.blue }]}>
+                        {selectedService?.serviceTitle.charAt(0).toUpperCase() || 'S'}
+                      </Text>
+                    </View>
+                  )}
+                </View>
+
+                {/* Title */}
+                <Text style={[styles.modalTitle, { color: iosColors.label }]}>
+                  {selectedService?.serviceTitle || 'Xizmat'}
+                </Text>
+
+                {/* Info cards (iOS grouped style) */}
+                <View style={[styles.modalInfoGroup, { backgroundColor: isDark ? '#2C2C2E' : '#F2F2F7' }]}>
+                  {/* Name */}
+                  {selectedService?.serviceName ? (
+                    <View style={[styles.modalInfoRow, { borderBottomColor: iosColors.separator }]}>
+                      <View style={[styles.modalInfoIcon, { backgroundColor: '#34C759' }]}>
+                        <Ionicons name="at-outline" size={16} color="#FFFFFF" />
+                      </View>
+                      <View style={styles.modalInfoContent}>
+                        <Text style={[styles.modalInfoLabel, { color: iosColors.secondaryLabel }]}>Nomi</Text>
+                        <Text style={[styles.modalInfoValue, { color: iosColors.label }]}>{selectedService.serviceName}</Text>
+                      </View>
+                    </View>
+                  ) : null}
+
+                  {/* Title */}
+                  {selectedService?.serviceTitle ? (
+                    <View style={[styles.modalInfoRow, { borderBottomColor: iosColors.separator }]}>
+                      <View style={[styles.modalInfoIcon, { backgroundColor: '#007AFF' }]}>
+                        <Ionicons name="text-outline" size={16} color="#FFFFFF" />
+                      </View>
+                      <View style={styles.modalInfoContent}>
+                        <Text style={[styles.modalInfoLabel, { color: iosColors.secondaryLabel }]}>Sarlavha</Text>
+                        <Text style={[styles.modalInfoValue, { color: iosColors.label }]}>{selectedService.serviceTitle}</Text>
+                      </View>
+                    </View>
+                  ) : null}
+
+                  {/* About */}
+                  {selectedService?.about ? (
+                    <View style={[styles.modalInfoRow, { borderBottomWidth: 0 }]}>
+                      <View style={[styles.modalInfoIcon, { backgroundColor: '#FF9500' }]}>
+                        <Ionicons name="information-circle-outline" size={16} color="#FFFFFF" />
+                      </View>
+                      <View style={styles.modalInfoContent}>
+                        <Text style={[styles.modalInfoLabel, { color: iosColors.secondaryLabel }]}>Haqida</Text>
+                        <Text style={[styles.modalInfoValue, { color: iosColors.label }]}>{selectedService.about}</Text>
+                      </View>
+                    </View>
+                  ) : null}
+                </View>
+
+                {/* Stats */}
+                <View style={[styles.modalInfoGroup, { backgroundColor: isDark ? '#2C2C2E' : '#F2F2F7' }]}>
+                  <View style={[styles.modalInfoRow, { borderBottomColor: iosColors.separator }]}>
+                    <View style={[styles.modalInfoIcon, { backgroundColor: '#5856D6' }]}>
+                      <Ionicons name="mail-outline" size={16} color="#FFFFFF" />
+                    </View>
+                    <View style={styles.modalInfoContent}>
+                      <Text style={[styles.modalInfoLabel, { color: iosColors.secondaryLabel }]}>Jami xabarlar</Text>
+                      <Text style={[styles.modalInfoValue, { color: iosColors.label }]}>{selectedService?.totalCount || 0}</Text>
+                    </View>
+                  </View>
+
+                  <View style={[styles.modalInfoRow, { borderBottomWidth: 0 }]}>
+                    <View style={[styles.modalInfoIcon, { backgroundColor: '#FF3B30' }]}>
+                      <Ionicons name="mail-unread-outline" size={16} color="#FFFFFF" />
+                    </View>
+                    <View style={styles.modalInfoContent}>
+                      <Text style={[styles.modalInfoLabel, { color: iosColors.secondaryLabel }]}>O'qilmagan</Text>
+                      <Text style={[styles.modalInfoValue, { color: iosColors.label }]}>{selectedService?.unreadCount || 0}</Text>
+                    </View>
+                  </View>
+                </View>
+              </ScrollView>
+
+              {/* Close */}
+              <TouchableOpacity
+                style={[styles.modalCloseBtn, { backgroundColor: iosColors.blue }]}
+                onPress={() => setServiceModalVisible(false)}
+              >
+                <Text style={styles.modalCloseBtnText}>Yopish</Text>
               </TouchableOpacity>
             </View>
-
-            <Text style={[styles.drawerSectionLabel, { color: colors.textMuted }]}>
-              Faol Xizmatlar Roʻyxati
-            </Text>
-
-            <FlatList
-              data={servicesList}
-              keyExtractor={(item) => item.id}
-              showsVerticalScrollIndicator={false}
-              renderItem={({ item }) => {
-                const isSelected = selectedServiceId === item.id;
-
-                return (
-                  <TouchableOpacity
-                    style={[
-                      styles.serviceDrawerCard,
-                      { backgroundColor: colors.cardBg, borderColor: colors.cardBorder },
-                      isSelected && {
-                        backgroundColor: `${colors.accent}15`,
-                        borderColor: colors.accent,
-                      },
-                    ]}
-                    onPress={() => {
-                      setSelectedServiceId(item.id);
-                      toggleDrawer(false);
-                    }}
-                    activeOpacity={0.8}
-                  >
-                    <View style={styles.serviceDrawerHeaderRow}>
-                      {item.logo_url ? (
-                        <Image source={{ uri: getFullLogoUrl(item.logo_url) || undefined }} style={styles.drawerLogoImage} />
-                      ) : (
-                        <View style={[styles.serviceDrawerIconBox, { backgroundColor: `${item.color}20` }]}>
-                          <Ionicons name={item.icon} size={18} color={item.color} />
-                        </View>
-                      )}
-
-                      <Text
-                        style={[
-                          styles.serviceDrawerTitle,
-                          { color: colors.textPrimary },
-                          isSelected && { color: colors.accent, fontWeight: '700' },
-                        ]}
-                        numberOfLines={1}
-                      >
-                        {item.title}
-                      </Text>
-
-                      {item.count > 0 && (
-                        <View style={[styles.countBadge, { backgroundColor: isSelected ? colors.accent : 'rgba(255, 255, 255, 0.1)' }]}>
-                          <Text style={[styles.countText, { color: isSelected ? '#000' : colors.textPrimary }]}>
-                            {item.count}
-                          </Text>
-                        </View>
-                      )}
-                    </View>
-
-                    {item.latestMessage && (
-                      <Text
-                        style={[styles.serviceDrawerSubMessage, { color: colors.textMuted }]}
-                        numberOfLines={2}
-                      >
-                        {item.latestMessage}
-                      </Text>
-                    )}
-                  </TouchableOpacity>
-                );
-              }}
-            />
-
-            <View style={[styles.drawerFooter, { borderTopColor: colors.cardBorder }]}>
-              <View style={styles.footerInfoBox}>
-                <Ionicons name="shield-checkmark-outline" size={16} color={colors.accent} />
-                <Text style={[styles.footerText, { color: colors.textMuted }]}>
-                  Authenticator v1.0 • Immediate Push
-                </Text>
-              </View>
-            </View>
-          </LinearGradient>
-        </Animated.View>
+          </View>
+        </Modal>
 
         {/* OWNER ADMIN PANEL MODAL */}
         <OwnerPanelModal
           visible={ownerModalVisible}
           onClose={() => setOwnerModalVisible(false)}
           onServiceCreated={() => fetchNotifications(false)}
+          userRole={userInfo?.role}
         />
 
-        {/* NOTIFICATION DETAIL MODAL */}
-        <Modal
-          visible={Boolean(selectedNotif)}
-          animationType="fade"
-          transparent
-          onRequestClose={() => setSelectedNotif(null)}
-        >
-          <View style={styles.modalBackdrop}>
-            <View style={[styles.detailModalCard, { backgroundColor: colors.cardBg, borderColor: colors.cardBorder }]}>
-              <View style={styles.detailHeaderRow}>
-                <View style={{ flexDirection: 'row', alignItems: 'center', flex: 1 }}>
-                  {selectedNotif?.logo_url ? (
-                    <Image
-                      source={{ uri: getFullLogoUrl(selectedNotif.logo_url) || undefined }}
-                      style={styles.detailLogoImg}
-                    />
-                  ) : (
-                    <View style={[styles.detailDefaultLogo, { backgroundColor: `${colors.accent}20` }]}>
-                      <Ionicons name="mail" size={20} color={colors.accent} />
-                    </View>
-                  )}
-                  <View style={{ marginLeft: 10, flex: 1 }}>
-                    <Text style={[styles.detailServiceTitle, { color: colors.textPrimary }]} numberOfLines={1}>
-                      {selectedNotif?.service_name || 'Xizmat Xabari'}
-                    </Text>
-                    <Text style={[styles.detailDateTxt, { color: colors.textMuted }]}>
-                      {formatDate(selectedNotif?.sent_at || selectedNotif?.created_at)}
-                    </Text>
-                  </View>
-                </View>
-
-                <TouchableOpacity
-                  style={[styles.closeDetailBtn, { borderColor: colors.cardBorder }]}
-                  onPress={() => setSelectedNotif(null)}
-                >
-                  <Ionicons name="close" size={20} color={colors.textPrimary} />
-                </TouchableOpacity>
-              </View>
-
-              <View style={[styles.detailDivider, { backgroundColor: colors.cardBorder }]} />
-
-              <Text style={[styles.detailMessageTxt, { color: colors.textPrimary }]}>
-                {selectedNotif?.message}
-              </Text>
-
-              <TouchableOpacity
-                style={[styles.detailDoneBtn, { backgroundColor: colors.accent }]}
-                onPress={() => setSelectedNotif(null)}
-              >
-                <Text style={styles.detailDoneTxt}>Tushunarli</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </Modal>
       </SafeAreaView>
-    </LinearGradient>
+    </View>
   );
 }
 
@@ -748,157 +727,176 @@ const styles = StyleSheet.create({
   },
   safeArea: {
     flex: 1,
-    paddingTop: Platform.OS === 'android' ? 36 : 0,
+    paddingTop: Platform.OS === 'android' ? (StatusBar.currentHeight ?? 36) : 0,
   },
-  topBar: {
+
+  /* ── Header (iOS Messages style) ── */
+  header: {
+    paddingHorizontal: 16,
+    paddingBottom: 8,
+  },
+  headerTopRow: {
     flexDirection: 'row',
-    alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-  },
-  hamburgerBtn: {
-    width: 42,
-    height: 42,
-    borderRadius: 21,
-    justifyContent: 'center',
     alignItems: 'center',
-    borderWidth: 1,
-  },
-  userHead: {
-    flex: 1,
-    marginHorizontal: 12,
-    alignItems: 'flex-start',
-  },
-  userNameRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  userNameText: {
-    fontSize: 15,
-    fontWeight: '700',
-    maxWidth: 160,
-  },
-  ownerBadge: {
-    backgroundColor: '#eab308',
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 6,
-    marginLeft: 6,
-  },
-  ownerBadgeText: {
-    color: '#000000',
-    fontSize: 10,
-    fontWeight: '800',
-    letterSpacing: 0.5,
-  },
-  userSubText: {
-    fontSize: 12,
-    marginTop: 2,
-  },
-  topActions: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  iconCircle: {
-    width: 38,
-    height: 38,
-    borderRadius: 19,
-    borderWidth: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginLeft: 8,
-  },
-  adminOwnerBtn: {
-    borderWidth: 1.5,
-  },
-  statsRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 16,
-    marginBottom: 10,
-    gap: 8,
-  },
-  statCard: {
-    flex: 1,
     paddingVertical: 8,
-    paddingHorizontal: 10,
-    borderRadius: 14,
-    borderWidth: 1,
-    alignItems: 'center',
   },
-  statValue: {
-    fontSize: 16,
-    fontWeight: '800',
+  headerAction: {
+    fontSize: 17,
+    fontWeight: '400',
   },
-  statLabel: {
-    fontSize: 11,
-    marginTop: 2,
-  },
-  markAllBtn: {
+  headerRightActions: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingVertical: 10,
-    paddingHorizontal: 12,
-    borderRadius: 14,
-    borderWidth: 1,
-    gap: 4,
   },
-  markAllTxt: {
-    fontSize: 12,
+  largeTitle: {
+    fontSize: 34,
     fontWeight: '700',
+    letterSpacing: 0.37,
+    marginBottom: 4,
   },
-  searchFilterContainer: {
-    paddingHorizontal: 16,
+  userInfoRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
     marginBottom: 12,
   },
-  searchBox: {
+  userInfoText: {
+    fontSize: 13,
+    fontWeight: '400',
+  },
+  roleBadge: {
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+    marginLeft: 8,
+  },
+  roleBadgeText: {
+    color: '#FFFFFF',
+    fontSize: 10,
+    fontWeight: '700',
+    letterSpacing: 0.4,
+  },
+
+  /* ── Search Bar ── */
+  searchBar: {
     flexDirection: 'row',
     alignItems: 'center',
-    height: 42,
-    borderRadius: 12,
-    paddingHorizontal: 12,
-    borderWidth: 1,
-    marginBottom: 8,
+    height: 36,
+    borderRadius: 10,
+    paddingHorizontal: 10,
+    marginBottom: 10,
   },
   searchInput: {
     flex: 1,
-    fontSize: 13,
+    fontSize: 16,
+    marginLeft: 6,
+    paddingVertical: 0,
   },
-  filterPillsRow: {
-    flexDirection: 'row',
-    gap: 8,
-  },
-  filterPill: {
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 14,
-    borderWidth: 1,
-  },
-  activeFilterPill: {
-    borderColor: 'transparent',
-  },
-  filterPillTxt: {
-    fontSize: 12,
-    fontWeight: '600',
-  },
-  activeFilterBanner: {
+
+  /* ── Filter Row ── */
+  filterRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
-    marginHorizontal: 16,
-    marginBottom: 10,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 10,
-    borderWidth: 1,
+    gap: 8,
+    marginBottom: 4,
   },
-  activeFilterTxt: {
-    fontSize: 12,
+  filterChip: {
+    paddingHorizontal: 14,
+    paddingVertical: 6,
+    borderRadius: 16,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  filterChipText: {
+    fontSize: 13,
     fontWeight: '600',
   },
+
+  /* ── Conversation Cell ── */
+  conversationCell: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    paddingLeft: 16,
+    paddingVertical: 10,
+  },
+  avatar: {
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+  },
+  avatarFallback: {
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  avatarInitial: {
+    fontSize: 24,
+    fontWeight: '600',
+  },
+  conversationContent: {
+    flex: 1,
+    marginLeft: 12,
+    paddingRight: 16,
+  },
+  conversationTopRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 3,
+  },
+  conversationTitle: {
+    fontSize: 16,
+    fontWeight: '400',
+    flex: 1,
+    marginRight: 8,
+  },
+  conversationTitleBold: {
+    fontWeight: '700',
+  },
+  timeChevronRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  conversationTime: {
+    fontSize: 14,
+    fontWeight: '400',
+  },
+  conversationBottomRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+  },
+  conversationPreview: {
+    fontSize: 14,
+    lineHeight: 19,
+    fontWeight: '400',
+    flex: 1,
+    marginRight: 8,
+  },
+  unreadBadge: {
+    minWidth: 22,
+    height: 22,
+    borderRadius: 11,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 6,
+    marginTop: 2,
+  },
+  unreadBadgeText: {
+    color: '#FFFFFF',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  cellSeparator: {
+    height: StyleSheet.hairlineWidth,
+    marginTop: 10,
+  },
+
+  /* ── List ── */
   listContent: {
-    paddingHorizontal: 16,
     paddingBottom: 40,
   },
   centerContainer: {
@@ -908,253 +906,124 @@ const styles = StyleSheet.create({
   },
   loadingText: {
     marginTop: 12,
-    fontSize: 14,
+    fontSize: 15,
   },
-  glassCard: {
-    borderRadius: 16,
-    padding: 14,
-    marginBottom: 10,
-    borderWidth: 1,
-  },
-  cardRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  cardIconCircle: {
-    width: 38,
-    height: 38,
-    borderRadius: 12,
-    backgroundColor: 'rgba(255, 255, 255, 0.05)',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  cardLogoImage: {
-    width: 38,
-    height: 38,
-    borderRadius: 12,
-  },
-  cardTopMeta: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 4,
-  },
-  cardServiceTag: {
-    fontSize: 12,
-    fontWeight: '700',
-    flex: 1,
-  },
-  cardMsg: {
-    fontSize: 13,
-    lineHeight: 18,
-    fontWeight: '400',
-  },
-  cardTime: {
-    fontSize: 11,
-    marginLeft: 8,
-  },
-  unreadGlowDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    marginLeft: 8,
-  },
+
+  /* ── Empty State ── */
   emptyContainer: {
     alignItems: 'center',
     justifyContent: 'center',
-    paddingVertical: 60,
+    paddingVertical: 80,
+  },
+  emptyIconWrap: {
+    width: 88,
+    height: 88,
+    borderRadius: 44,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 16,
   },
   emptyTitle: {
-    fontSize: 16,
-    fontWeight: '700',
-    marginTop: 14,
+    fontSize: 20,
+    fontWeight: '600',
+    marginBottom: 6,
   },
   emptySub: {
-    fontSize: 13,
+    fontSize: 15,
     textAlign: 'center',
-    marginTop: 6,
-    paddingHorizontal: 30,
-    lineHeight: 18,
+    paddingHorizontal: 40,
+    lineHeight: 20,
   },
-  overlay: {
-    position: 'absolute',
-    top: 0,
-    bottom: 0,
-    left: 0,
-    right: 0,
-    backgroundColor: 'rgba(0, 0, 0, 0.75)',
-    zIndex: 90,
-  },
-  drawerContainer: {
-    position: 'absolute',
-    top: 0,
-    bottom: 0,
-    left: 0,
-    width: DRAWER_WIDTH,
-    zIndex: 100,
-    borderRightWidth: 1,
-  },
-  drawerInner: {
-    flex: 1,
-    paddingTop: Platform.OS === 'ios' ? 60 : 44,
-    paddingHorizontal: 16,
-  },
-  drawerHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: 16,
-    paddingBottom: 14,
-    borderBottomWidth: 1,
-  },
-  drawerHeaderLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  drawerBadge: {
-    width: 36,
-    height: 36,
-    borderRadius: 10,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 10,
-    borderWidth: 1,
-  },
-  drawerTitle: {
-    fontSize: 20,
-    fontWeight: '800',
-    letterSpacing: 0.5,
-  },
-  closeDrawerBtn: {
-    padding: 6,
-  },
-  drawerSectionLabel: {
-    fontSize: 12,
-    fontWeight: '700',
-    textTransform: 'uppercase',
-    letterSpacing: 0.8,
-    marginBottom: 12,
-  },
-  serviceDrawerCard: {
-    borderRadius: 14,
-    padding: 12,
-    marginBottom: 8,
-    borderWidth: 1,
-  },
-  serviceDrawerHeaderRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  serviceDrawerIconBox: {
-    width: 32,
-    height: 32,
-    borderRadius: 10,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 10,
-  },
-  drawerLogoImage: {
-    width: 32,
-    height: 32,
-    borderRadius: 10,
-    marginRight: 10,
-  },
-  serviceDrawerTitle: {
-    flex: 1,
-    fontSize: 14,
-    fontWeight: '600',
-  },
-  countBadge: {
-    paddingHorizontal: 8,
-    paddingVertical: 2,
-    borderRadius: 10,
-    marginLeft: 6,
-  },
-  countText: {
-    fontSize: 11,
-    fontWeight: '700',
-  },
-  serviceDrawerSubMessage: {
-    fontSize: 12,
-    marginTop: 6,
-    lineHeight: 16,
-    paddingLeft: 42,
-  },
-  drawerFooter: {
-    paddingVertical: 16,
-    borderTopWidth: 1,
-    marginTop: 10,
-  },
-  footerInfoBox: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  footerText: {
-    fontSize: 11,
-    marginLeft: 6,
-  },
+
+  /* ── Service Info Modal ── */
   modalBackdrop: {
     flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.7)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: 24,
+    justifyContent: 'flex-end',
+    backgroundColor: 'rgba(0,0,0,0.5)',
   },
-  detailModalCard: {
-    width: '100%',
-    maxWidth: 400,
-    borderRadius: 20,
-    padding: 20,
-    borderWidth: 1,
+  serviceModal: {
+    borderTopLeftRadius: 14,
+    borderTopRightRadius: 14,
+    paddingHorizontal: 16,
+    paddingTop: 12,
+    paddingBottom: Platform.OS === 'ios' ? 40 : 24,
+    maxHeight: '80%',
   },
-  detailHeaderRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-  },
-  detailLogoImg: {
+  modalHandle: {
     width: 36,
-    height: 36,
-    borderRadius: 10,
-  },
-  detailDefaultLogo: {
-    width: 36,
-    height: 36,
-    borderRadius: 10,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  detailServiceTitle: {
-    fontSize: 15,
-    fontWeight: '700',
-  },
-  detailDateTxt: {
-    fontSize: 11,
-    marginTop: 2,
-  },
-  closeDetailBtn: {
-    padding: 6,
-    borderRadius: 14,
-    borderWidth: 1,
-  },
-  detailDivider: {
-    height: 1,
-    marginVertical: 14,
-  },
-  detailMessageTxt: {
-    fontSize: 15,
-    lineHeight: 22,
+    height: 5,
+    borderRadius: 2.5,
+    alignSelf: 'center',
     marginBottom: 20,
   },
-  detailDoneBtn: {
+  modalLogoWrap: {
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  modalLogo: {
+    width: 80,
+    height: 80,
+    borderRadius: 40,
+  },
+  modalLogoFallback: {
+    width: 80,
+    height: 80,
+    borderRadius: 40,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  modalLogoInitial: {
+    fontSize: 36,
+    fontWeight: '600',
+  },
+  modalTitle: {
+    fontSize: 22,
+    fontWeight: '700',
+    textAlign: 'center',
+    letterSpacing: 0.35,
+    marginBottom: 20,
+  },
+  modalInfoGroup: {
+    borderRadius: 12,
+    marginBottom: 16,
+    overflow: 'hidden',
+  },
+  modalInfoRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
     paddingVertical: 12,
+    paddingHorizontal: 14,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+  },
+  modalInfoIcon: {
+    width: 30,
+    height: 30,
+    borderRadius: 7,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  modalInfoContent: {
+    flex: 1,
+    marginLeft: 12,
+  },
+  modalInfoLabel: {
+    fontSize: 12,
+    fontWeight: '400',
+    marginBottom: 2,
+  },
+  modalInfoValue: {
+    fontSize: 15,
+    fontWeight: '500',
+    lineHeight: 20,
+  },
+  modalCloseBtn: {
+    paddingVertical: 14,
     borderRadius: 12,
     alignItems: 'center',
   },
-  detailDoneTxt: {
-    color: '#ffffff',
-    fontSize: 14,
-    fontWeight: '700',
+  modalCloseBtnText: {
+    color: '#FFFFFF',
+    fontSize: 17,
+    fontWeight: '600',
   },
 });

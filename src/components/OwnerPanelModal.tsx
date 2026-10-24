@@ -35,14 +35,17 @@ interface OwnerPanelModalProps {
   visible: boolean;
   onClose: () => void;
   onServiceCreated?: () => void;
+  userRole?: string; // 'owner' | 'admin' | 'user'
 }
 
-type TabType = 'services' | 'send' | 'register';
+type TabType = 'services' | 'send' | 'register' | 'delete';
 type SendType = 'broadcast' | 'single';
 
-export default function OwnerPanelModal({ visible, onClose, onServiceCreated }: OwnerPanelModalProps) {
+export default function OwnerPanelModal({ visible, onClose, onServiceCreated, userRole }: OwnerPanelModalProps) {
   const { colors, theme } = useTheme();
   const { showToast } = useToast();
+  const isAdmin = userRole?.toLowerCase() === 'admin';
+  const isOwner = !isAdmin; // owner or privileged default
 
   const [activeTab, setActiveTab] = useState<TabType>('services');
 
@@ -72,6 +75,10 @@ export default function OwnerPanelModal({ visible, onClose, onServiceCreated }: 
   const [singleMsg, setSingleMsg] = useState('');
   const [sending, setSending] = useState(false);
 
+  // Delete Service State
+  const [deleteToken, setDeleteToken] = useState('');
+  const [deleting, setDeleting] = useState(false);
+
   // Fetch services when modal opens
   useEffect(() => {
     if (visible) {
@@ -84,6 +91,7 @@ export default function OwnerPanelModal({ visible, onClose, onServiceCreated }: 
     try {
       const data = await servicesService.getServices();
       // getServices returns [] for 404 ("no services yet") — no error needed
+      // NOTE: GET /services/get is owner-only (API.md §6.2). Admin gets 403 here.
       const list = Array.isArray(data) ? data : [];
       setServices(list);
       if (list.length > 0 && !selectedServiceId) {
@@ -92,8 +100,10 @@ export default function OwnerPanelModal({ visible, onClose, onServiceCreated }: 
       }
     } catch (err: any) {
       const errStatus = (err as any)?.response?.status;
-      // 403 = not owner (expected), 404 = handled in getServices (shouldn't reach here)
-      if (errStatus !== 403 && errStatus !== 404) {
+      if (errStatus === 403) {
+        // Admin role — GET /services/get is owner-only. Services tab is hidden.
+        setServices([]);
+      } else if (errStatus !== 404) {
         console.warn('Services load error:', parseApiError(err));
         showToast({
           type: 'error',
@@ -200,6 +210,39 @@ export default function OwnerPanelModal({ visible, onClose, onServiceCreated }: 
       });
     } finally {
       setRegistering(false);
+    }
+  };
+
+  // Delete a service — owner (any) or admin (own services only)
+  const handleDeleteService = async (serviceToken?: string) => {
+    const tokenToDelete = serviceToken || deleteToken.trim();
+    if (!tokenToDelete) {
+      showToast({
+        type: 'error',
+        title: 'Token Kiritilmagan',
+        message: 'O\u02bbchiriladigan xizmat tokenini kiriting.',
+      });
+      return;
+    }
+    setDeleting(true);
+    try {
+      await servicesService.deleteService(tokenToDelete);
+      showToast({
+        type: 'success',
+        title: 'Xizmat O\u02bbchirildi ✅',
+        message: 'Xizmat va uning bildirishnomalari muvaffaqiyatli o\u02bblindi.',
+      });
+      setDeleteToken('');
+      setSelectedServiceDetail(null);
+      await loadServices();
+    } catch (err: any) {
+      showToast({
+        type: 'error',
+        title: 'O\u02bbchirishda Xatolik',
+        message: parseApiError(err, 'Xizmatni o\u02bbchirishda xatolik yuz berdi.'),
+      });
+    } finally {
+      setDeleting(false);
     }
   };
 
@@ -334,27 +377,30 @@ export default function OwnerPanelModal({ visible, onClose, onServiceCreated }: 
 
           {/* Navigation Tabs */}
           <View style={[styles.tabBar, { borderBottomColor: colors.cardBorder }]}>
-            <TouchableOpacity
-              style={[
-                styles.tabItem,
-                activeTab === 'services' && [styles.activeTabItem, { borderBottomColor: colors.accent }],
-              ]}
-              onPress={() => setActiveTab('services')}
-            >
-              <Ionicons
-                name="layers-outline"
-                size={18}
-                color={activeTab === 'services' ? colors.accent : colors.textMuted}
-              />
-              <Text
+            {/* Services tab — only shown to owner (admin gets 403 on getServices) */}
+            {!isAdmin && (
+              <TouchableOpacity
                 style={[
-                  styles.tabText,
-                  { color: activeTab === 'services' ? colors.accent : colors.textMuted },
+                  styles.tabItem,
+                  activeTab === 'services' && [styles.activeTabItem, { borderBottomColor: colors.accent }],
                 ]}
+                onPress={() => setActiveTab('services')}
               >
-                Xizmatlar ({services.length})
-              </Text>
-            </TouchableOpacity>
+                <Ionicons
+                  name="layers-outline"
+                  size={18}
+                  color={activeTab === 'services' ? colors.accent : colors.textMuted}
+                />
+                <Text
+                  style={[
+                    styles.tabText,
+                    { color: activeTab === 'services' ? colors.accent : colors.textMuted },
+                  ]}
+                >
+                  Xizmatlar ({services.length})
+                </Text>
+              </TouchableOpacity>
+            )}
 
             <TouchableOpacity
               style={[
@@ -378,25 +424,51 @@ export default function OwnerPanelModal({ visible, onClose, onServiceCreated }: 
               </Text>
             </TouchableOpacity>
 
+            {/* Register — owner only (API.md §1) */}
+            {!isAdmin && (
+              <TouchableOpacity
+                style={[
+                  styles.tabItem,
+                  activeTab === 'register' && [styles.activeTabItem, { borderBottomColor: colors.accent }],
+                ]}
+                onPress={() => setActiveTab('register')}
+              >
+                <Ionicons
+                  name="add-circle-outline"
+                  size={18}
+                  color={activeTab === 'register' ? colors.accent : colors.textMuted}
+                />
+                <Text
+                  style={[
+                    styles.tabText,
+                    { color: activeTab === 'register' ? colors.accent : colors.textMuted },
+                  ]}
+                >
+                  Yangi Servis
+                </Text>
+              </TouchableOpacity>
+            )}
+
+            {/* Delete — owner & admin (API.md §3) */}
             <TouchableOpacity
               style={[
                 styles.tabItem,
-                activeTab === 'register' && [styles.activeTabItem, { borderBottomColor: colors.accent }],
+                activeTab === 'delete' && [styles.activeTabItem, { borderBottomColor: '#ef4444' }],
               ]}
-              onPress={() => setActiveTab('register')}
+              onPress={() => setActiveTab('delete')}
             >
               <Ionicons
-                name="add-circle-outline"
+                name="trash-outline"
                 size={18}
-                color={activeTab === 'register' ? colors.accent : colors.textMuted}
+                color={activeTab === 'delete' ? '#ef4444' : colors.textMuted}
               />
               <Text
                 style={[
                   styles.tabText,
-                  { color: activeTab === 'register' ? colors.accent : colors.textMuted },
+                  { color: activeTab === 'delete' ? '#ef4444' : colors.textMuted },
                 ]}
               >
-                Yangi Servis
+                Oʻchirish
               </Text>
             </TouchableOpacity>
           </View>
@@ -860,6 +932,91 @@ export default function OwnerPanelModal({ visible, onClose, onServiceCreated }: 
                 </View>
               </View>
             )}
+            {/* TAB 4: DELETE SERVICE — owner (any) & admin (own only) */}
+            {activeTab === 'delete' && (
+              <View>
+                <Text style={[styles.sectionTitle, { color: '#ef4444' }]}>
+                  Xizmatni Oʻchirish
+                </Text>
+                <Text style={[styles.sectionSub, { color: colors.textMuted }]}>
+                  {isAdmin
+                    ? 'Admin: faqat o\u02bbzingizga tegishli xizmatni o\u02bbchira olasiz. Service tokenini kiriting.'
+                    : 'Owner: istalgan xizmatni o\u02bbchira olasiz. Service tokenini kiriting yoki yuqoridagi ro\u02bbxatdan tanlang.'}
+                </Text>
+
+                {/* Quick select from loaded services (owner only) */}
+                {!isAdmin && services.length > 0 && (
+                  <View style={{ marginBottom: 14 }}>
+                    <Text style={[styles.inputLabel, { color: colors.textSecondary }]}>Tezkor tanlash:</Text>
+                    <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+                      {services.map((srv) => (
+                        <TouchableOpacity
+                          key={srv.id}
+                          style={[
+                            styles.serviceChip,
+                            {
+                              backgroundColor: deleteToken === (srv.token || '') ? '#ef444420' : colors.inputBg,
+                              borderColor: deleteToken === (srv.token || '') ? '#ef4444' : colors.cardBorder,
+                            },
+                          ]}
+                          onPress={() => setDeleteToken(srv.token || '')}
+                        >
+                          <Text style={[
+                            styles.serviceChipTxt,
+                            { color: deleteToken === (srv.token || '') ? '#ef4444' : colors.textPrimary },
+                          ]}>
+                            {srv.title}
+                          </Text>
+                        </TouchableOpacity>
+                      ))}
+                    </ScrollView>
+                  </View>
+                )}
+
+                <View style={[styles.formCard, { backgroundColor: colors.cardBg, borderColor: '#ef444440' }]}>
+                  <Text style={[styles.inputLabel, { color: colors.textSecondary }]}>
+                    Xizmat Tokeni (srv_token_...)
+                  </Text>
+                  <View style={[styles.inputWrap, { backgroundColor: colors.inputBg, borderColor: colors.inputBorder }]}>
+                    <Ionicons name="key-outline" size={18} color="#ef4444" style={{ marginRight: 8 }} />
+                    <TextInput
+                      style={[styles.input, { color: colors.textPrimary }]}
+                      placeholder="srv_token_3f9a..."
+                      placeholderTextColor={colors.textMuted}
+                      value={deleteToken}
+                      onChangeText={setDeleteToken}
+                      autoCapitalize="none"
+                    />
+                    {deleteToken.length > 0 && (
+                      <TouchableOpacity onPress={() => setDeleteToken('')}>
+                        <Ionicons name="close-circle" size={18} color={colors.textMuted} />
+                      </TouchableOpacity>
+                    )}
+                  </View>
+
+                  <TouchableOpacity
+                    style={[styles.submitBtn, { marginTop: 16 }]}
+                    onPress={() => handleDeleteService()}
+                    disabled={deleting || !deleteToken.trim()}
+                    activeOpacity={0.85}
+                  >
+                    <View style={[
+                      styles.submitBtnGrad,
+                      { backgroundColor: deleteToken.trim() ? '#ef4444' : '#ef444460', borderRadius: 12 },
+                    ]}>
+                      {deleting ? (
+                        <ActivityIndicator color="#fff" />
+                      ) : (
+                        <>
+                          <Ionicons name="trash" size={18} color="#fff" />
+                          <Text style={styles.submitBtnTxt}>Xizmatni Oʻchirish (POST /services/delete)</Text>
+                        </>
+                      )}
+                    </View>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            )}
           </ScrollView>
         </LinearGradient>
       </KeyboardAvoidingView>
@@ -965,12 +1122,18 @@ export default function OwnerPanelModal({ visible, onClose, onServiceCreated }: 
                   <Text style={[styles.detailActionTxt, { color: colors.accent }]}>Xabar Yuborish</Text>
                 </TouchableOpacity>
 
+                {/* Delete button — owner (any) & admin (own only) per API.md §3 */}
                 <TouchableOpacity
-                  style={[styles.detailActionBtn, { backgroundColor: 'rgba(239,68,68,0.1)', borderColor: '#ef4444' }]}
-                  onPress={() => setSelectedServiceDetail(null)}
+                  style={[styles.detailActionBtn, { backgroundColor: 'rgba(239,68,68,0.12)', borderColor: '#ef4444' }]}
+                  onPress={() => {
+                    if (!selectedServiceDetail?.token) return;
+                    setSelectedServiceDetail(null);
+                    setDeleteToken(selectedServiceDetail.token);
+                    setActiveTab('delete');
+                  }}
                 >
-                  <Ionicons name="close-circle-outline" size={18} color="#ef4444" />
-                  <Text style={[styles.detailActionTxt, { color: '#ef4444' }]}>Yopish</Text>
+                  <Ionicons name="trash-outline" size={18} color="#ef4444" />
+                  <Text style={[styles.detailActionTxt, { color: '#ef4444' }]}>Oʻchirish</Text>
                 </TouchableOpacity>
               </View>
             </ScrollView>

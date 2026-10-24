@@ -31,6 +31,7 @@ function RootContent() {
         <Stack.Screen name="register" options={{ animation: 'slide_from_right' }} />
         <Stack.Screen name="login" options={{ animation: 'slide_from_right' }} />
         <Stack.Screen name="notifications" options={{ animation: 'fade' }} />
+        <Stack.Screen name="notification-detail" options={{ animation: 'slide_from_right' }} />
       </Stack>
     </View>
   );

@@ -1,6 +1,5 @@
 import axios from 'axios';
 import { router } from 'expo-router';
-import { Platform } from 'react-native';
 import { triggerGlobalToast } from '../context/ToastContext';
 import { safeStorage } from './storage';
 
@@ -13,12 +12,6 @@ export const normalizePhone = (raw) => {
 
 // Default base URL
 export const getBaseUrl = () => {
-  if (process.env.EXPO_PUBLIC_API_URL) {
-    return process.env.EXPO_PUBLIC_API_URL.replace(/\/+$/, '');
-  }
-  if (Platform.OS === 'android') {
-    return 'https://api.authenticator.devguard.uz/api/v1';
-  }
   return 'https://api.authenticator.devguard.uz/api/v1';
 };
 
@@ -42,12 +35,12 @@ const api = axios.create({
 });
 
 // Dynamic Base URL loader
-safeStorage.getItem('customApiUrl').then((customUrl) => {
-  if (customUrl) {
-    api.defaults.baseURL = customUrl;
-    console.log('📌 [API Custom BaseURL loaded]:', customUrl);
-  }
-});
+// safeStorage.getItem('customApiUrl').then((customUrl) => {
+//   if (customUrl) {
+//     api.defaults.baseURL = customUrl;
+//     console.log('📌 [API Custom BaseURL loaded]:', customUrl);
+//   }
+// });
 
 export const setApiBaseUrl = async (url) => {
   let formattedUrl = url.trim().replace(/\/+$/, '');
@@ -358,7 +351,7 @@ export const authService = {
       try {
         const parsed = JSON.parse(localUser);
         if (parsed.role) return String(parsed.role).toLowerCase();
-      } catch (e) {}
+      } catch (e) { }
     }
     return 'user';
   },
@@ -499,6 +492,32 @@ export const servicesService = {
         headers: {
           Authorization: `Bearer ${token}`,
           'Content-Type': 'application/json',
+        },
+        timeout: 30000,
+      }
+    );
+    return res.data;
+  },
+
+  /**
+   * Delete a service by its token
+   * POST /services/delete?service_token=<serviceToken>
+   * Auth: owner (any service) or admin (own services only)
+   * @param {string} serviceToken - The srv_token_... of the service to delete
+   * Response 200: { message: "Service muvaffaqiyatli o'chirildi !", status: 204 }
+   * Errors:
+   *   403 — caller is plain `user`, or admin trying to delete someone else's service
+   *   404 — unknown service_token
+   */
+  deleteService: async (serviceToken) => {
+    const host = getServicesHostUrl();
+    const token = await safeStorage.getItem('userToken');
+    const res = await axios.post(
+      `${host}/services/delete?service_token=${encodeURIComponent(serviceToken)}`,
+      {},
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
         },
         timeout: 30000,
       }
