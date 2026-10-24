@@ -1,15 +1,15 @@
 {
   "expo": {
-    "name": "AuthenticatorApp",
-    "slug": "AuthenticatorApp",
+    "name": "PassKey",
+    "slug": "passkey",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/logo.png",
-    "scheme": "authenticatorapp",
+    "scheme": "passkey",
     "userInterfaceStyle": "automatic",
     "ios": {
       "icon": "./assets/images/logo.png",
-      "bundleIdentifier": "com.devguard.authenticatorapp",
+      "bundleIdentifier": "com.devguard.passkey",
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false
       }
@@ -22,7 +22,7 @@
         "monochromeImage": "./assets/images/logo.png"
       },
       "predictiveBackGestureEnabled": false,
-      "package": "com.devguard.authenticatorapp"
+      "package": "com.devguard.passkey"
     },
     "web": {
       "output": "static",
