@@ -1,6 +1,5 @@
 import Constants, { ExecutionEnvironment } from 'expo-constants';
 import { Platform } from 'react-native';
-import * as Device from 'expo-device';
 import { safeStorage } from './storage';
 
 const isExpoGo =
@@ -93,7 +92,6 @@ export async function sendLocalPushNotification({ title, body, data = {} }) {
  */
 export async function getDevicePushToken() {
   try {
-    // Check if we already have a cached/stored device token
     const cachedToken = await safeStorage.getItem('device_token');
 
     if (!isExpoGo && Platform.OS !== 'web' && Notifications) {
@@ -111,20 +109,17 @@ export async function getDevicePushToken() {
       }
     }
 
-    if (cachedToken) {
+    if (cachedToken && !cachedToken.startsWith('fcm_emergency') && !cachedToken.startsWith('fcm_android')) {
       return cachedToken;
     }
 
-    // Deterministic fallback device token for simulators/Expo Go/environments without native FCM
-    const deviceId = Device.osBuildId || Device.modelId || Device.deviceName || 'device';
-    const fallbackToken = `fcm_${Platform.OS}_${deviceId}_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`.replace(/\s+/g, '_');
-    await safeStorage.setItem('device_token', fallbackToken);
-    console.log('📱 [Generated Permanent Device Token]:', fallbackToken);
-    return fallbackToken;
+    // ❌ SOXTA TOKEN GENERATSIYA QILISHNI TO'XTATAMIZ!
+    console.log('⚠️ [Push Token]: Haqiqiy FCM token olinmadi (Expo Go yoki Emulator bo\'lishi mumkin).');
+    return null;
+
   } catch (error) {
-    console.warn('⚠️ [Push Token Fetch Fallback Error]:', error?.message || error);
-    const emergencyToken = `fcm_${Platform.OS}_emergency_${Date.now()}`;
-    return emergencyToken;
+    console.warn('⚠️ [Push Token Fetch Error]:', error?.message || error);
+    return null;
   }
 }
 
